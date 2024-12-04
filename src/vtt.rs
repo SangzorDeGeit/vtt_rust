@@ -1,4 +1,3 @@
-// test comment
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
 use geo::Coord;
