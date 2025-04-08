@@ -1,11 +1,14 @@
 // test comment for test 3
+use crate::{
+    errors::RustVttError,
+    fog_of_war::{FogOfWar, Operation},
+    helper::{calculate_direct_los, get_line_segments},
+};
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
 use geo::Coord;
-use std::{f64, fs::File, io::Write, path::Path};
-
-use crate::{errors::RustVttError, fog_of_war::FogOfWar};
 use serde::{Deserialize, Serialize};
+use std::{f64, fs::File, io::Write, path::Path};
 
 /// The main VTT structure containing all the data that is in the .vtt file.
 #[derive(Serialize, Deserialize)]
@@ -104,32 +107,63 @@ impl VTT {
         return self;
     }
 
-    /// Given a coordinate on the image, this function should show everything that a person
+    /// Given a coordinate on the image, this function should show or hide everything that a person
     /// standing at this coordinate could see, any objects blocking line of sight (defined in the
     /// objects_line_of_sight parameter) are disregarded.
     /// ## `pov`
     /// The coordinate at which the person you want to reveal area for is standing
     /// ## `around_walls`
     /// Whether the person at the pov point can look around walls perfectly. When false, this will
-    /// function as a 'line of sight' fog of war reveal.
-    pub fn fow_show(&mut self, pov: Coordinate, around_walls: bool) -> Result<(), RustVttError> {
-        // this implementation will be around walls false for now
-        // First check if the given coordinate is not on the bounds of the grid
-        if pov.x >= self.size().x || pov.x < self.origin().x {
+    /// function as a 'line of sight' fog of war update.
+    pub fn fow_change(
+        &mut self,
+        pov: Coordinate,
+        around_walls: bool,
+        operation: Operation,
+    ) -> Result<(), RustVttError> {
+        // First check if the given coordinate is not on or out of the bounds of the grid
+        if pov.x <= self.origin().x || self.size().x <= pov.x {
             return Err(RustVttError::OutOfBounds { coordinate: pov });
         }
-        if pov.y >= self.size().y || pov.y < self.origin().y {
+        if pov.y <= self.origin().y || self.size().y <= pov.y {
             return Err(RustVttError::OutOfBounds { coordinate: pov });
         }
-        // Then check if the coordinate is not on a wall line
+        // Check if the coordinate is not on a wall line
+        let wall_segments = get_line_segments(&self.line_of_sight);
+        for wall in &wall_segments {
+            // to find if point (x,y) is on the slope of line with start (x1, y1) and end (x2, y2)
+            // use the following equation:
+            // (y-y1)*(x2-x1)=(y2-y1)*(x-x1)
+            let x1 = wall.start_point().x();
+            let y1 = wall.start_point().y();
+            let x2 = wall.end_point().x();
+            let y2 = wall.end_point().y();
+            if (pov.y - y1) * (x2 - x1) != (y2 - y1) * (pov.x - x1) {
+                continue;
+            }
+            if pov.x <= x1.min(x2) || x1.max(x1) <= pov.x {
+                continue;
+            }
+            if pov.y <= y1.min(y2) || y1.max(y1) <= pov.y {
+                continue;
+            }
+            return Err(RustVttError::InvalidPoint { coordinate: pov });
+        }
+        // with these segments we have two different big functions
+        // first is direct los which creates a polygon area that the point can see
+        // the second is a indirect los which uses vectors to return the polygon that the player
+        // can see
+        if around_walls {
+            todo!("Implement calculation for around walls line of sight")
+        } else {
+            let line_of_sight_polygon =
+                calculate_direct_los(pov, &wall_segments, self.origin(), self.size());
+        }
 
-        Ok(())
-    }
-
-    /// Given a coordinate on the image, this function should hide everything that a person
-    /// standing at this coordinate could see. See [`fow_show`][crate::vtt::VTT::fow_show()] for param specifications.
-    pub fn fow_hide(&mut self, pov: Coordinate, around_walls: bool) {
-        todo!("Implement this function");
+        match operation {
+            Operation::HIDE => todo!(),
+            Operation::SHOW => todo!(),
+        }
     }
 
     /// Save the base64 encoded image of this vtt to a .png file.
@@ -138,7 +172,6 @@ impl VTT {
     /// # Example
     /// `save_image("path/to/filename")`
     pub fn save_img_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        // you can do path.as_ref() to get the path object
         let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
         let mut file = File::options()
             .write(true)
