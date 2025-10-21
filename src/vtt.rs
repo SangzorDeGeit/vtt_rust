@@ -1,7 +1,7 @@
 // test comment for test 3
 use crate::{
     errors::RustVttError,
-    fog_of_war::{FogOfWar, Operation},
+    fog_of_war::{self, FogOfWar, Operation},
     helper::{calculate_direct_los, get_line_segments},
 };
 use anyhow::Result;
@@ -21,16 +21,16 @@ pub struct VTT {
     environment: Environment,
     lights: Vec<Light>,
     #[serde(skip)]
-    fog_of_war: FogOfWar,
+    fog_of_war: Option<FogOfWar>,
     image: String,
 }
 
 #[doc(hidden)]
 #[derive(Serialize, Deserialize)]
 pub struct Resolution {
-    map_origin: Coordinate,
-    map_size: Coordinate,
-    pixels_per_grid: i32,
+    pub map_origin: Coordinate,
+    pub map_size: Coordinate,
+    pub pixels_per_grid: i32,
 }
 
 #[doc(hidden)]
@@ -67,6 +67,25 @@ pub struct Coordinate {
     pub y: f64,
 }
 
+/// A 2d coordinate represented by pixels
+#[derive(Clone)]
+pub struct PixelCoordinate {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl PixelCoordinate {
+    /// Create a PixelCoordinate from a coordinate represented by floats and a resolution
+    pub fn from(coordinate: &Coordinate, pixels_per_grid: i32) -> Self {
+        let x = coordinate.x * pixels_per_grid as f64;
+        let y = coordinate.y * pixels_per_grid as f64;
+        Self {
+            x: x as i32,
+            y: y as i32,
+        }
+    }
+}
+
 impl Into<Coord> for Coordinate {
     fn into(self) -> Coord {
         Coord {
@@ -96,15 +115,13 @@ impl VTT {
     }
 
     /// Add fog of war to cover the entire image
-    pub fn fow_hide_all(&mut self) -> &mut Self {
-        self.fog_of_war.hide_all();
-        return self;
+    pub fn fow_hide_all(&mut self) {
+        self.fog_of_war = Some(FogOfWar::new(&self.resolution));
     }
 
     /// Remove fog of war from the entire image
-    pub fn fow_show_all(&mut self) -> &mut Self {
-        self.fog_of_war.show_all();
-        return self;
+    pub fn fow_show_all(&mut self) {
+        self.fog_of_war = None;
     }
 
     /// Given a coordinate on the image, this function should show or hide everything that a person
@@ -149,10 +166,7 @@ impl VTT {
             }
             return Err(RustVttError::InvalidPoint { coordinate: pov });
         }
-        // with these segments we have two different big functions
-        // first is direct los which creates a polygon area that the point can see
-        // the second is a indirect los which uses vectors to return the polygon that the player
-        // can see
+
         if around_walls {
             todo!("Implement calculation for around walls line of sight")
         } else {
