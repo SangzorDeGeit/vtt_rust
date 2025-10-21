@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use geo::LineIntersection::{Collinear, SinglePoint};
-use geo::{line_intersection, Coord, Line, LineString, Polygon};
+use geo::{line_intersection, Coord, Line, LineString};
 
 use crate::vtt::Coordinate;
 
@@ -9,6 +9,8 @@ const STEP_SIZE: f64 = 0.1;
 // Floating point multiplier to avoid floating point arithmetic
 const PRECISION: f64 = 10_000.0;
 
+/// Generate a Linestring (polygon) representing the area that the pov can see. This vision is
+/// blocked by walls
 pub fn calculate_direct_los(
     pov: Coordinate,
     wall_segments: &Vec<Line>,
@@ -100,6 +102,8 @@ pub fn calculate_direct_los(
     los_ring
 }
 
+/// Generate a linestring that will return the line of sight from the pov point, the pov can look
+/// perfectly around walls.
 /// Get all the intersection points with all the vectors going FROM the point
 /// input an array of lines
 /// compare line 1 with line 2, then 3 then 4 etc. get intersections
