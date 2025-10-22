@@ -1,17 +1,38 @@
-// test comment for test 3
 use crate::{
     errors::RustVttError,
-    fog_of_war::{self, FogOfWar, Operation},
-    helper::{calculate_direct_los, get_line_segments},
+    fog_of_war::{FogOfWar, Operation},
+    helper::{calculate_direct_los, calculate_indirect_los, get_line_segments},
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::Coord;
+use geo::{Coord, LineString};
+use image::{
+    save_buffer, DynamicImage, ExtendedColorType, GenericImageView, ImageBuffer, ImageReader, Rgba,
+    RgbaImage,
+};
 use serde::{Deserialize, Serialize};
-use std::{f64, fs::File, io::Write, path::Path};
+use std::{
+    f64,
+    fs::File,
+    io::{Cursor, Write},
+    path::Path,
+};
+
+/// A VTT struct containing all data that is in the .vtt file without fog of war.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VTTPartial {
+    format: f32,
+    resolution: Resolution,
+    line_of_sight: Vec<Vec<Coordinate>>,
+    objects_line_of_sight: Vec<Vec<Coordinate>>,
+    portals: Vec<Portal>,
+    environment: Environment,
+    lights: Vec<Light>,
+    image: String,
+}
 
 /// The main VTT structure containing all the data that is in the .vtt file.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct VTT {
     format: f32,
     resolution: Resolution,
@@ -20,13 +41,12 @@ pub struct VTT {
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
-    #[serde(skip)]
-    fog_of_war: Option<FogOfWar>,
+    fog_of_war: FogOfWar,
     image: String,
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Resolution {
     pub map_origin: Coordinate,
     pub map_size: Coordinate,
@@ -34,7 +54,7 @@ pub struct Resolution {
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Light {
     position: Coordinate,
     range: f64,
@@ -44,14 +64,14 @@ pub struct Light {
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Environment {
     baked_lighting: bool,
     ambient_light: Option<String>,
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Portal {
     position: Coordinate,
     bounds: Vec<Coordinate>,
@@ -61,14 +81,14 @@ pub struct Portal {
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct Coordinate {
     pub x: f64,
     pub y: f64,
 }
 
 /// A 2d coordinate represented by pixels
-#[derive(Clone)]
+#[derive(Clone, Debug, Copy, PartialEq)]
 pub struct PixelCoordinate {
     pub x: i32,
     pub y: i32,
@@ -84,6 +104,19 @@ impl PixelCoordinate {
             y: y as i32,
         }
     }
+
+    pub fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Into<Coord> for PixelCoordinate {
+    fn into(self) -> Coord {
+        Coord {
+            x: self.x as f64,
+            y: self.y as f64,
+        }
+    }
 }
 
 impl Into<Coord> for Coordinate {
@@ -95,7 +128,30 @@ impl Into<Coord> for Coordinate {
     }
 }
 
+impl VTTPartial {
+    /// Convert the partial vtt to a vtt struct that contains fog of war
+    pub fn to_vtt(self) -> VTT {
+        let fog_of_war = FogOfWar::new(self.resolution.clone());
+        VTT {
+            format: self.format,
+            resolution: self.resolution,
+            line_of_sight: self.line_of_sight,
+            objects_line_of_sight: self.objects_line_of_sight,
+            portals: self.portals,
+            environment: self.environment,
+            lights: self.lights,
+            fog_of_war,
+            image: self.image,
+        }
+    }
+}
+
 impl VTT {
+    /// Return the format of the VTT
+    pub fn format(&self) -> f32 {
+        self.format
+    }
+
     /// Return the origin point of the VTT in squares
     pub fn origin(&self) -> &Coordinate {
         return &self.resolution.map_origin;
@@ -116,12 +172,17 @@ impl VTT {
 
     /// Add fog of war to cover the entire image
     pub fn fow_hide_all(&mut self) {
-        self.fog_of_war = Some(FogOfWar::new(&self.resolution));
+        self.fog_of_war.hide_all();
     }
 
     /// Remove fog of war from the entire image
     pub fn fow_show_all(&mut self) {
-        self.fog_of_war = None;
+        self.fog_of_war.show_all();
+    }
+
+    /// Get the fog of war of the vtt
+    pub fn get_fow(&self) -> &FogOfWar {
+        &self.fog_of_war
     }
 
     /// Given a coordinate on the image, this function should show or hide everything that a person
@@ -167,17 +228,30 @@ impl VTT {
             return Err(RustVttError::InvalidPoint { coordinate: pov });
         }
 
+        let line_of_sight_polygon: LineString;
         if around_walls {
-            todo!("Implement calculation for around walls line of sight")
+            line_of_sight_polygon = calculate_indirect_los(pov, &wall_segments);
         } else {
-            let line_of_sight_polygon =
+            line_of_sight_polygon =
                 calculate_direct_los(pov, &wall_segments, self.origin(), self.size());
         }
 
-        match operation {
-            Operation::HIDE => todo!(),
-            Operation::SHOW => todo!(),
+        self.fog_of_war.update(operation, &line_of_sight_polygon);
+
+        Ok(())
+    }
+
+    /// Apply the current fog of war to the image, painting every fog of war covered pixel black
+    /// and returning the updated image
+    fn apply_fow(&self, image: &DynamicImage) -> RgbaImage {
+        let mut image = image.to_rgba8();
+        let rectangles = self.fog_of_war.get_rectangles();
+        for rectangle in rectangles {
+            rectangle.for_each_pixel(&mut |x, y| {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            });
         }
+        image
     }
 
     /// Save the base64 encoded image of this vtt to a .png file.
@@ -196,15 +270,21 @@ impl VTT {
         Ok(())
     }
 
-    /// Apply all vtt data (fog of war, lighting, etc.) to the image stored in this vtt and save it to a .png file. This
-    /// function will **not** overwrite the existing image stored in the vtt.  
+    /// Apply all vtt data (fog of war, lighting, etc.) to the image stored in this vtt and save it to a .png file.
     pub fn save_img<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        // clone the image
-        // self.fog_of_war.apply_to_image(image);
-        // self.environment.apply_to_image(image);
-        // self.lights.apply_to_image(image);
-        // save the image
-        todo!("Implement this function")
+        let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
+        let img = ImageReader::new(Cursor::new(decoded))
+            .with_guessed_format()?
+            .decode()?;
+        let img = self.apply_fow(&img);
+        save_buffer(
+            path,
+            &img,
+            img.width(),
+            img.height(),
+            ExtendedColorType::Rgba8,
+        )?;
+        Ok(())
     }
 }
 
@@ -264,5 +344,14 @@ mod tests {
             .expect("Could not open file the pig and whistle tavern.uvtt");
         vtt.save_img_raw("tests/resources/tavern.png")
             .expect("Failed to save to png");
+    }
+
+    #[test]
+    fn vtt_fow_hide_all() {
+        let mut vtt = open_vtt("tests/resources/The Pig and Whistle tavern.uvtt")
+            .expect("Could not open file the pig and whistle tavern.uvtt");
+        vtt.fow_hide_all();
+        vtt.save_img("tests/resources/black.png")
+            .expect("Could not save the image to png")
     }
 }
