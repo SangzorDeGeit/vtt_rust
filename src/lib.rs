@@ -26,7 +26,9 @@ mod quadtreenode;
 mod vtt;
 use anyhow::Result;
 use std::{fs::File, io::Read, path::Path};
+use vtt::VTTPartial;
 
+pub use fog_of_war::FogOfWar;
 pub use vtt::VTT;
 
 /// Open a vtt file and store the contents in memory
@@ -34,6 +36,6 @@ pub fn open_vtt<P: AsRef<Path>>(path: P) -> Result<VTT> {
     let mut file = File::open(path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
-    let vtt: VTT = serde_json::from_str(&contents)?;
-    return Ok(vtt);
+    let vttpartial: VTTPartial = serde_json::from_str(&contents)?;
+    return Ok(vttpartial.to_vtt());
 }

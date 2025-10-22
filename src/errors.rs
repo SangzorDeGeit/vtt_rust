@@ -1,6 +1,6 @@
 use thiserror::{self, Error};
 
-use crate::vtt::Coordinate;
+use crate::{quadtreenode::FoWRectangle, vtt::Coordinate};
 
 #[derive(Error, Debug)]
 pub enum RustVttError {
@@ -8,4 +8,6 @@ pub enum RustVttError {
     OutOfBounds { coordinate: Coordinate },
     #[error("Coordinate (x,y): ({}, {}) lies on a wall segment", coordinate.x, coordinate.y)]
     InvalidPoint { coordinate: Coordinate },
+    #[error("Given rectangle is already the minimum size: {:?}", rectangle)]
+    MinimumRectangle { rectangle: FoWRectangle },
 }

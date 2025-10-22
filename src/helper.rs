@@ -109,7 +109,7 @@ pub fn calculate_direct_los(
 /// compare line 1 with line 2, then 3 then 4 etc. get intersections
 /// if two lines intersect, the intersection point is always closer to the starting point compared
 /// to the end point
-pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) {
+pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> LineString {
     todo!("Implement this function")
 }
 
@@ -117,13 +117,7 @@ pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) {
 /// This function is used to streamline the wall segments data of vtt files
 pub fn get_line_segments(line_of_sight_elements: &Vec<Vec<Coordinate>>) -> Vec<Line> {
     let mut all_lines: Vec<Line> = Vec::new();
-    // a vec of coordinates is a line
     for line in line_of_sight_elements {
-        // The idea is that prev_point is initialized as None
-        // the first loop this prev_point is set equal to the first coordinate in the current line
-        // the next loops a new line is made from two coordinates, the previous point and the
-        // current point. This turns a Line Vec<(0,0), (1,1), (2,2)> into two lines Vec<(0,0),(1,1)>,
-        // Vec<(1,1),(2,2)> seperating the line into multiple segments.
         let mut prev_point: Option<Coord> = None;
         for point in line {
             if let Some(prev) = prev_point {
@@ -195,7 +189,7 @@ fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Opt
     return Some(intersection.clone());
 }
 
-/// Calculates the distance betweeen two points
+/// Calculates the distance between two points
 fn distance(c1: &Coord, c2: &Coord) -> f64 {
     //sqrt[(|x1-x2|^2) + (|y1-y2|^2)]
     return ((c1.x - c2.x).abs().powi(2) + (c1.y - c2.y).abs().powi(2)).sqrt();
