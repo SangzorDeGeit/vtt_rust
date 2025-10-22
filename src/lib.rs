@@ -20,10 +20,10 @@
 //! all these properties at once and then updating the image.
 
 mod errors;
-mod fog_of_war;
+pub mod fog_of_war;
 mod helper;
-mod quadtreenode;
-mod vtt;
+pub mod quadtreenode;
+pub mod vtt;
 use anyhow::Result;
 use std::{fs::File, io::Read, path::Path};
 use vtt::VTTPartial;

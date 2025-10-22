@@ -2,6 +2,7 @@ use geo::Contains;
 use geo::Coord;
 use geo::Intersects;
 use geo::LineString;
+use geo::Polygon;
 use geo::Rect;
 
 use crate::errors::RustVttError;
@@ -56,14 +57,14 @@ impl QuadtreeNode {
     /// If the node is a leaf node it will split the bounding box into four rectangles, this
     /// function returns an error if the rectangle is already the minimum size
     pub fn to_internal(&mut self) -> Result<(), RustVttError> {
-        let children = match self {
-            QuadtreeNode::Leaf { bounds, .. } => bounds.split()?,
+        let (children, visible) = match self {
+            QuadtreeNode::Leaf { bounds, visible } => (bounds.split()?, visible),
             QuadtreeNode::Internal { .. } => return Ok(()),
         };
-        let topleft = Box::new(Self::from_bounds(children.0, true));
-        let topright = Box::new(Self::from_bounds(children.1, true));
-        let bottomleft = Box::new(Self::from_bounds(children.2, true));
-        let bottomright = Box::new(Self::from_bounds(children.3, true));
+        let topleft = Box::new(Self::from_bounds(children.0, *visible));
+        let topright = Box::new(Self::from_bounds(children.1, *visible));
+        let bottomleft = Box::new(Self::from_bounds(children.2, *visible));
+        let bottomright = Box::new(Self::from_bounds(children.3, *visible));
         *self = Self::Internal {
             topleft,
             topright,
@@ -123,20 +124,23 @@ impl QuadtreeNode {
     /// Given a line of sight polygon and an operation this function will create a tree that
     /// reveals or hides the part of the polygon. The input to this function should be a completely
     /// hidden (visible=false) or completely shown (visible=true) root node.
-    pub fn create_tree(&mut self, make_visible: bool, polygon: &LineString) {
+    pub fn create_tree(&mut self, make_visible: bool, polygon: &Polygon) {
         match self {
-            Self::Leaf { bounds, visible } => match bounds.in_linestring(polygon) {
+            Self::Leaf { bounds, visible } => match bounds.in_polygon(polygon) {
                 InLineString::INSIDE => {
                     *visible = make_visible;
+                    return;
                 }
                 InLineString::OUTSIDE => {
                     *visible = !make_visible;
+                    return;
                 }
                 InLineString::PARTIAL => {
                     if let Err(_) = self.to_internal() {
                         return;
                     }
                     self.create_tree(make_visible, polygon);
+                    return;
                 }
             },
             Self::Internal {
@@ -152,9 +156,6 @@ impl QuadtreeNode {
                 return;
             }
         };
-        // for the node: if it is a leaf: check its relation to the polygon
-        // hide or show it completely, or turn it into an internal node
-        // if it is an internal node, follow each subnote
     }
 
     /// Add fog of war represented by other to self
@@ -321,14 +322,13 @@ impl FoWRectangle {
         }
     }
 
-    /// Checks whether the current rectangle is inside the linestring by checking each corner point
-    /// of the rectangle.
-    pub fn in_linestring(&self, linestring: &LineString) -> InLineString {
+    /// Checks whether the current rectangle is inside the linestring
+    pub fn in_polygon(&self, polygon: &Polygon) -> InLineString {
         let rectangle = self.to_rectangle();
-        if linestring.contains(&rectangle) {
+        if polygon.contains(&rectangle) {
             return InLineString::INSIDE;
         }
-        if !rectangle.intersects(linestring) {
+        if !rectangle.intersects(polygon) {
             return InLineString::OUTSIDE;
         }
         InLineString::PARTIAL
@@ -348,7 +348,7 @@ impl FoWRectangle {
         let width = self.topright.x - self.topleft.x;
         let height = self.bottomleft.y - self.topleft.y; // pixels count up from top to bottom of
                                                          // the screen
-        if width < 2 || height < 2 {
+        if width < 3 || height < 3 {
             return Err(RustVttError::MinimumRectangle {
                 rectangle: self.clone(),
             });
@@ -402,8 +402,8 @@ impl FoWRectangle {
 
     /// Run a closure for each pixel in the rectangle
     pub fn for_each_pixel<F: FnMut(u32, u32)>(&self, f: &mut F) {
-        for x in self.topleft.x..self.topright.x {
-            for y in self.topleft.y..self.bottomleft.y {
+        for x in self.topleft.x..=self.topright.x {
+            for y in self.topleft.y..=self.bottomleft.y {
                 f(x as u32, y as u32)
             }
         }

@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{Coord, LineString};
+use geo::{Coord, LineString, Polygon, Scale};
 use image::{
     save_buffer, DynamicImage, ExtendedColorType, GenericImageView, ImageBuffer, ImageReader, Rgba,
     RgbaImage,
@@ -228,7 +228,7 @@ impl VTT {
             return Err(RustVttError::InvalidPoint { coordinate: pov });
         }
 
-        let line_of_sight_polygon: LineString;
+        let mut line_of_sight_polygon: Polygon;
         if around_walls {
             line_of_sight_polygon = calculate_indirect_los(pov, &wall_segments);
         } else {
@@ -236,6 +236,13 @@ impl VTT {
                 calculate_direct_los(pov, &wall_segments, self.origin(), self.size());
         }
 
+        let ppg = self.pixels_per_grid() as f64;
+        line_of_sight_polygon.exterior_mut(|f| {
+            f.coords_mut().for_each(|f| {
+                f.x = (f.x * ppg).round();
+                f.y = (f.y * ppg).round();
+            })
+        });
         self.fog_of_war.update(operation, &line_of_sight_polygon);
 
         Ok(())
@@ -248,7 +255,9 @@ impl VTT {
         let rectangles = self.fog_of_war.get_rectangles();
         for rectangle in rectangles {
             rectangle.for_each_pixel(&mut |x, y| {
-                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                if x < image.width() && y < image.height() {
+                    image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                }
             });
         }
         image
@@ -290,6 +299,7 @@ impl VTT {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::open_vtt;
 
     #[test]
@@ -347,11 +357,31 @@ mod tests {
     }
 
     #[test]
+    fn vtt_save_small_img() {
+        let vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
+        vtt.save_img_raw("tests/resources/small.png")
+            .expect("Failed to save to png");
+    }
+
+    #[test]
     fn vtt_fow_hide_all() {
-        let mut vtt = open_vtt("tests/resources/The Pig and Whistle tavern.uvtt")
-            .expect("Could not open file the pig and whistle tavern.uvtt");
+        let mut vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
         vtt.fow_hide_all();
         vtt.save_img("tests/resources/black.png")
+            .expect("Could not save the image to png")
+    }
+
+    #[test]
+    fn vtt_fow_direct_los() {
+        let mut vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
+        vtt.fow_hide_all();
+        let pov = Coordinate { x: 4.0, y: 7.0 };
+        vtt.fow_change(pov, false, Operation::SHOW)
+            .expect("Could not update fow");
+        vtt.save_img("tests/resources/los.png")
             .expect("Could not save the image to png")
     }
 }

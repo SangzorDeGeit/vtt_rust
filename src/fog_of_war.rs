@@ -2,7 +2,7 @@
 //! covered by fog of war. This struct is used in the VTT struct. It is generally recommended to
 //! access this struct via the VTT implementation.
 
-use geo::LineString;
+use geo::{LineString, Polygon};
 
 use crate::quadtreenode::{FoWRectangle, QuadtreeNode};
 use crate::vtt::Resolution;
@@ -49,7 +49,7 @@ impl FogOfWar {
     }
 
     /// Update the fog of war according to a given polygon
-    pub fn update(&mut self, operation: Operation, polygon: &LineString) {
+    pub fn update(&mut self, operation: Operation, polygon: &Polygon) {
         let mut new_area = match &operation {
             Operation::HIDE => QuadtreeNode::from_resolution(&self.resolution, true),
             Operation::SHOW => QuadtreeNode::from_resolution(&self.resolution, false),

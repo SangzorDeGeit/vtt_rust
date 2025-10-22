@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use geo::LineIntersection::{Collinear, SinglePoint};
-use geo::{line_intersection, Coord, Line, LineString};
+use geo::{line_intersection, Coord, Line, LineString, Polygon};
 
 use crate::vtt::Coordinate;
 
@@ -9,14 +9,14 @@ const STEP_SIZE: f64 = 0.1;
 // Floating point multiplier to avoid floating point arithmetic
 const PRECISION: f64 = 10_000.0;
 
-/// Generate a Linestring (polygon) representing the area that the pov can see. This vision is
+/// Generate a Polygon representing the area that the pov can see. This vision is
 /// blocked by walls
 pub fn calculate_direct_los(
     pov: Coordinate,
     wall_segments: &Vec<Line>,
     origin: &Coordinate,
     size: &Coordinate,
-) -> LineString {
+) -> Polygon {
     let mut top_intersections = Vec::new();
     let mut right_intersections = Vec::new();
     let mut bottom_intersections = Vec::new();
@@ -99,7 +99,8 @@ pub fn calculate_direct_los(
         los_ring.is_closed(),
         "The resulting line of sight ring is not closed (Begin and end coordinate are not equal)"
     );
-    los_ring
+    let polygon = Polygon::new(los_ring, vec![]);
+    polygon
 }
 
 /// Generate a linestring that will return the line of sight from the pov point, the pov can look
@@ -109,7 +110,7 @@ pub fn calculate_direct_los(
 /// compare line 1 with line 2, then 3 then 4 etc. get intersections
 /// if two lines intersect, the intersection point is always closer to the starting point compared
 /// to the end point
-pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> LineString {
+pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> Polygon {
     todo!("Implement this function")
 }
 
