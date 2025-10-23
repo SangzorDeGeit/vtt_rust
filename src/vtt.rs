@@ -5,11 +5,8 @@ use crate::{
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{Coord, LineString, Polygon, Scale};
-use image::{
-    save_buffer, DynamicImage, ExtendedColorType, GenericImageView, ImageBuffer, ImageReader, Rgba,
-    RgbaImage,
-};
+use geo::{Coord, Distance, Euclidean, Polygon};
+use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::{
     f64,
@@ -24,7 +21,7 @@ pub struct VTTPartial {
     format: f32,
     resolution: Resolution,
     line_of_sight: Vec<Vec<Coordinate>>,
-    objects_line_of_sight: Vec<Vec<Coordinate>>,
+    objects_line_of_sight: Option<Vec<Vec<Coordinate>>>,
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
@@ -37,7 +34,7 @@ pub struct VTT {
     format: f32,
     resolution: Resolution,
     line_of_sight: Vec<Vec<Coordinate>>,
-    objects_line_of_sight: Vec<Vec<Coordinate>>,
+    objects_line_of_sight: Option<Vec<Vec<Coordinate>>>,
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
@@ -208,24 +205,11 @@ impl VTT {
         }
         // Check if the coordinate is not on a wall line
         let wall_segments = get_line_segments(&self.line_of_sight);
+        let pov_coord: Coord = pov.into();
         for wall in &wall_segments {
-            // to find if point (x,y) is on the slope of line with start (x1, y1) and end (x2, y2)
-            // use the following equation:
-            // (y-y1)*(x2-x1)=(y2-y1)*(x-x1)
-            let x1 = wall.start_point().x();
-            let y1 = wall.start_point().y();
-            let x2 = wall.end_point().x();
-            let y2 = wall.end_point().y();
-            if (pov.y - y1) * (x2 - x1) != (y2 - y1) * (pov.x - x1) {
-                continue;
+            if Euclidean::distance(wall, pov_coord) < 1e-9 {
+                return Err(RustVttError::InvalidPoint { coordinate: pov });
             }
-            if pov.x <= x1.min(x2) || x1.max(x1) <= pov.x {
-                continue;
-            }
-            if pov.y <= y1.min(y2) || y1.max(y1) <= pov.y {
-                continue;
-            }
-            return Err(RustVttError::InvalidPoint { coordinate: pov });
         }
 
         let mut line_of_sight_polygon: Polygon;
@@ -350,8 +334,8 @@ mod tests {
 
     #[test]
     fn vtt_save_img() {
-        let vtt = open_vtt("tests/resources/The Pig and Whistle tavern.uvtt")
-            .expect("Could not open file the pig and whistle tavern.uvtt");
+        let vtt =
+            open_vtt("tests/resources/tavern.uvtt").expect("Could not open file the tavern.uvtt");
         vtt.save_img_raw("tests/resources/tavern.png")
             .expect("Failed to save to png");
     }

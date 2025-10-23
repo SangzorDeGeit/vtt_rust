@@ -1,15 +1,15 @@
-use geo::Contains;
+use geo::Area;
+use geo::BooleanOps;
 use geo::Coord;
-use geo::Intersects;
-use geo::LineString;
 use geo::Polygon;
 use geo::Rect;
 
 use crate::errors::RustVttError;
-use crate::fog_of_war::Operation;
-use crate::vtt::Coordinate;
 use crate::vtt::PixelCoordinate;
 use crate::vtt::Resolution;
+
+/// should not be smaller then 3
+const MIN_SQUARE_SIZE: i32 = 3;
 #[derive(Debug, Clone)]
 pub enum QuadtreeNode {
     Leaf {
@@ -25,11 +25,9 @@ pub enum QuadtreeNode {
 }
 
 // One rectangle within the quad tree represented by 4 corner nodes
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub struct FoWRectangle {
     topleft: PixelCoordinate,
-    topright: PixelCoordinate,
-    bottomleft: PixelCoordinate,
     bottomright: PixelCoordinate,
 }
 
@@ -78,13 +76,9 @@ impl QuadtreeNode {
     /// Get the area that this quadtree node should cover
     fn get_area(&self) -> FoWRectangle {
         let topleft = self.get_topleft_point();
-        let topright = self.get_topright_point();
-        let bottomleft = self.get_bottomleft_point();
         let bottomright = self.get_bottomright_point();
         FoWRectangle {
             topleft,
-            topright,
-            bottomleft,
             bottomright,
         }
     }
@@ -94,22 +88,6 @@ impl QuadtreeNode {
         match self {
             Self::Leaf { bounds, .. } => bounds.topleft,
             Self::Internal { topleft, .. } => topleft.get_topleft_point(),
-        }
-    }
-
-    /// Get topright point of self
-    fn get_topright_point(&self) -> PixelCoordinate {
-        match self {
-            QuadtreeNode::Leaf { bounds, .. } => bounds.topright,
-            QuadtreeNode::Internal { topright, .. } => topright.get_topright_point(),
-        }
-    }
-
-    /// Get bottomleft point of self
-    fn get_bottomleft_point(&self) -> PixelCoordinate {
-        match self {
-            QuadtreeNode::Leaf { bounds, .. } => bounds.bottomleft,
-            QuadtreeNode::Internal { bottomleft, .. } => bottomleft.get_bottomleft_point(),
         }
     }
 
@@ -274,6 +252,53 @@ impl QuadtreeNode {
         }
     }
 
+    /// Creates bigger quadtree squares when possible, if all leaf nodes have the same visibility
+    /// modifier
+    pub fn clean(&mut self) {
+        match self {
+            Self::Internal {
+                topleft,
+                topright,
+                bottomleft,
+                bottomright,
+            } => {
+                topleft.clean();
+                topright.clean();
+                bottomleft.clean();
+                bottomright.clean();
+                let n1 = match topleft.visible() {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let n2 = match topright.visible() {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let n3 = match bottomleft.visible() {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                let n4 = match bottomright.visible() {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
+                if n1 && n2 && n3 && n4 {
+                    *self = Self::Leaf {
+                        bounds: self.get_area(),
+                        visible: true,
+                    }
+                }
+                if !n1 && !n2 && !n3 && !n4 {
+                    *self = Self::Leaf {
+                        bounds: self.get_area(),
+                        visible: false,
+                    }
+                }
+            }
+            Self::Leaf { .. } => return,
+        }
+    }
+
     /// Populates the given vec with rectangles from the tree representing fog of war (leaf nodes
     /// where visible=false)
     pub fn populate_rectangle_vec(&self, vec: &mut Vec<FoWRectangle>) {
@@ -296,39 +321,43 @@ impl QuadtreeNode {
             }
         }
     }
+
+    /// return whether self is visible or not if it is an internal node it returns an error
+    fn visible(&self) -> Result<bool, RustVttError> {
+        match self {
+            QuadtreeNode::Leaf { visible, .. } => Ok(*visible),
+            QuadtreeNode::Internal { .. } => Err(RustVttError::InvalidInput),
+        }
+    }
 }
 
 impl FoWRectangle {
+    /// Create a new rectangle from a start and end point
+    pub fn new(topleft: PixelCoordinate, bottomright: PixelCoordinate) -> Self {
+        Self {
+            topleft,
+            bottomright,
+        }
+    }
+
     /// create a rectangle from the map resolution, this function creates the initial root square
     /// in the quad tree.
     pub fn from_resolution(resolution: &Resolution) -> Self {
         Self {
             topleft: PixelCoordinate::from(&resolution.map_origin, resolution.pixels_per_grid),
-            topright: PixelCoordinate::from(
-                &Coordinate {
-                    x: resolution.map_size.x,
-                    y: resolution.map_origin.y,
-                },
-                resolution.pixels_per_grid,
-            ),
-            bottomleft: PixelCoordinate::from(
-                &Coordinate {
-                    x: resolution.map_origin.x,
-                    y: resolution.map_size.y,
-                },
-                resolution.pixels_per_grid,
-            ),
             bottomright: PixelCoordinate::from(&resolution.map_size, resolution.pixels_per_grid),
         }
     }
 
     /// Checks whether the current rectangle is inside the linestring
     pub fn in_polygon(&self, polygon: &Polygon) -> InLineString {
-        let rectangle = self.to_rectangle();
-        if polygon.contains(&rectangle) {
+        let rectangle = self.to_rectangle().to_polygon();
+        let intersection = polygon.intersection(&rectangle).unsigned_area();
+        let rectangle_area = rectangle.unsigned_area();
+        if (intersection / rectangle_area) > 0.9999 {
             return InLineString::INSIDE;
         }
-        if !rectangle.intersects(polygon) {
+        if (intersection / rectangle_area) < 0.0001 {
             return InLineString::OUTSIDE;
         }
         InLineString::PARTIAL
@@ -345,50 +374,33 @@ impl FoWRectangle {
     fn split(
         &self,
     ) -> Result<(FoWRectangle, FoWRectangle, FoWRectangle, FoWRectangle), RustVttError> {
-        let width = self.topright.x - self.topleft.x;
-        let height = self.bottomleft.y - self.topleft.y; // pixels count up from top to bottom of
-                                                         // the screen
-        if width < 3 || height < 3 {
+        let width = self.bottomright.x - self.topleft.x;
+        let height = self.bottomright.y - self.topleft.y; // pixels count up from top to bottom of
+                                                          // the screen
+        if width < MIN_SQUARE_SIZE || height < MIN_SQUARE_SIZE {
             return Err(RustVttError::MinimumRectangle {
                 rectangle: self.clone(),
             });
         }
         let topleft_child = FoWRectangle {
             topleft: self.topleft,
-            topright: PixelCoordinate::new(self.topleft.x + (width / 2), self.topleft.y),
-            bottomleft: PixelCoordinate::new(self.topleft.x, self.topleft.y + (height / 2)),
             bottomright: PixelCoordinate::new(
                 self.topleft.x + (width / 2),
                 self.topleft.y + (height / 2),
             ),
         };
         let topright_child = FoWRectangle {
-            topleft: PixelCoordinate::new(self.topleft.x + (width / 2) + 1, self.topright.y),
-            topright: self.topright,
-            bottomleft: PixelCoordinate::new(
-                self.topleft.x + (width / 2) + 1,
-                self.topleft.y + (height / 2),
-            ),
-            bottomright: PixelCoordinate::new(self.topright.x, self.topleft.y + (height / 2)),
+            topleft: PixelCoordinate::new(self.topleft.x + (width / 2) + 1, self.topleft.y),
+            bottomright: PixelCoordinate::new(self.bottomright.x, self.topleft.y + (height / 2)),
         };
         let bottomleft_child = FoWRectangle {
-            topleft: PixelCoordinate::new(self.bottomleft.x, self.topleft.y + (height / 2) + 1),
-            topright: PixelCoordinate::new(
-                self.bottomleft.x + (width / 2),
-                self.topleft.y + (height / 2) + 1,
-            ),
-            bottomleft: self.bottomleft,
-            bottomright: PixelCoordinate::new(self.bottomleft.x + (width / 2), self.bottomleft.y),
+            topleft: PixelCoordinate::new(self.topleft.x, self.topleft.y + (height / 2) + 1),
+            bottomright: PixelCoordinate::new(self.topleft.x + (width / 2), self.bottomright.y),
         };
         let bottomright_child = FoWRectangle {
             topleft: PixelCoordinate::new(
                 self.topleft.x + (width / 2) + 1,
                 self.topleft.y + (height / 2) + 1,
-            ),
-            topright: PixelCoordinate::new(self.bottomright.x, self.topleft.y + (height / 2) + 1),
-            bottomleft: PixelCoordinate::new(
-                self.bottomleft.x + (width / 2) + 1,
-                self.bottomright.y,
             ),
             bottomright: self.bottomright,
         };
@@ -402,8 +414,8 @@ impl FoWRectangle {
 
     /// Run a closure for each pixel in the rectangle
     pub fn for_each_pixel<F: FnMut(u32, u32)>(&self, f: &mut F) {
-        for x in self.topleft.x..=self.topright.x {
-            for y in self.topleft.y..=self.bottomleft.y {
+        for x in self.topleft.x..=self.bottomright.x {
+            for y in self.topleft.y..=self.bottomright.y {
                 f(x as u32, y as u32)
             }
         }
@@ -418,8 +430,6 @@ mod tests {
     fn split_normal_rectangle() {
         let rect = FoWRectangle {
             topleft: PixelCoordinate::new(0, 0),
-            topright: PixelCoordinate::new(10, 0),
-            bottomleft: PixelCoordinate::new(0, 10),
             bottomright: PixelCoordinate::new(10, 10),
         };
 
@@ -430,8 +440,6 @@ mod tests {
             tl,
             FoWRectangle {
                 topleft: PixelCoordinate::new(0, 0),
-                topright: PixelCoordinate::new(5, 0),
-                bottomleft: PixelCoordinate::new(0, 5),
                 bottomright: PixelCoordinate::new(5, 5),
             }
         );
@@ -441,8 +449,6 @@ mod tests {
             tr,
             FoWRectangle {
                 topleft: PixelCoordinate::new(6, 0),
-                topright: PixelCoordinate::new(10, 0),
-                bottomleft: PixelCoordinate::new(6, 5),
                 bottomright: PixelCoordinate::new(10, 5),
             }
         );
@@ -452,8 +458,6 @@ mod tests {
             bl,
             FoWRectangle {
                 topleft: PixelCoordinate::new(0, 6),
-                topright: PixelCoordinate::new(5, 6),
-                bottomleft: PixelCoordinate::new(0, 10),
                 bottomright: PixelCoordinate::new(5, 10),
             }
         );
@@ -463,8 +467,6 @@ mod tests {
             br,
             FoWRectangle {
                 topleft: PixelCoordinate::new(6, 6),
-                topright: PixelCoordinate::new(10, 6),
-                bottomleft: PixelCoordinate::new(6, 10),
                 bottomright: PixelCoordinate::new(10, 10),
             }
         );
@@ -475,18 +477,16 @@ mod tests {
         // width and height are 11 pixels
         let rect = FoWRectangle {
             topleft: PixelCoordinate::new(0, 0),
-            topright: PixelCoordinate::new(11, 0),
-            bottomleft: PixelCoordinate::new(0, 11),
             bottomright: PixelCoordinate::new(11, 11),
         };
 
         let (tl, tr, bl, _br) = rect.split().expect("split should succeed");
 
         // Verify that the resulting rectangles are roughly equal size
-        let width_tl = tl.topright.x - tl.topleft.x;
-        let width_tr = tr.topright.x - tr.topleft.x;
-        let height_tl = tl.bottomleft.y - tl.topleft.y;
-        let height_bl = bl.bottomleft.y - bl.topleft.y;
+        let width_tl = tl.bottomright.x - tl.topleft.x;
+        let width_tr = tr.bottomright.x - tr.topleft.x;
+        let height_tl = tl.bottomright.y - tl.topleft.y;
+        let height_bl = bl.bottomright.y - bl.topleft.y;
 
         assert!(
             (width_tl - width_tr).abs() <= 1,
@@ -503,8 +503,6 @@ mod tests {
         // Only 1 pixel wide/high
         let rect = FoWRectangle {
             topleft: PixelCoordinate::new(0, 0),
-            topright: PixelCoordinate::new(1, 0),
-            bottomleft: PixelCoordinate::new(0, 1),
             bottomright: PixelCoordinate::new(1, 1),
         };
 

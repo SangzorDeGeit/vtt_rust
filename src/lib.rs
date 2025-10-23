@@ -22,7 +22,7 @@
 mod errors;
 pub mod fog_of_war;
 mod helper;
-pub mod quadtreenode;
+mod quadtreenode;
 pub mod vtt;
 use anyhow::Result;
 use std::{fs::File, io::Read, path::Path};

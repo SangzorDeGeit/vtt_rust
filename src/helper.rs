@@ -5,7 +5,7 @@ use geo::{line_intersection, Coord, Line, LineString, Polygon};
 
 use crate::vtt::Coordinate;
 
-const STEP_SIZE: f64 = 0.1;
+const STEP_SIZE: f64 = 0.2;
 // Floating point multiplier to avoid floating point arithmetic
 const PRECISION: f64 = 10_000.0;
 
@@ -134,7 +134,7 @@ pub fn get_line_segments(line_of_sight_elements: &Vec<Vec<Coordinate>>) -> Vec<L
 /// closest to the start point of the line. the `skip` variable determines how many intersection points to skip
 /// from closest to the start point of the line. The last intersection point will always be the end point of
 /// the input line (i.e. the edge of the image). If this intersection point is logically skipped it will return None
-fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Option<Coord> {
+pub fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Option<Coord> {
     // distances times PRECISION: so PRECISION precision points per square
     let mut all_intersections: HashMap<i64, Coord> = HashMap::new();
     let mut distances: Vec<i64> = Vec::new();
@@ -180,6 +180,7 @@ fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Opt
     distances.push(edge_distance);
     all_intersections.insert(edge_distance, line.end);
 
+    distances.sort();
     let key = match distances.get(skip) {
         Some(k) => k,
         None => return None,
