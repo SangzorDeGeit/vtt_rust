@@ -1,22 +1,22 @@
 use std::collections::HashMap;
 
 use geo::LineIntersection::{Collinear, SinglePoint};
-use geo::{line_intersection, Coord, Line, LineString};
+use geo::{line_intersection, Coord, Line, LineString, Polygon};
 
 use crate::vtt::Coordinate;
 
-const STEP_SIZE: f64 = 0.1;
+const STEP_SIZE: f64 = 0.2;
 // Floating point multiplier to avoid floating point arithmetic
 const PRECISION: f64 = 10_000.0;
 
-/// Generate a Linestring (polygon) representing the area that the pov can see. This vision is
+/// Generate a Polygon representing the area that the pov can see. This vision is
 /// blocked by walls
 pub fn calculate_direct_los(
     pov: Coordinate,
     wall_segments: &Vec<Line>,
     origin: &Coordinate,
     size: &Coordinate,
-) -> LineString {
+) -> Polygon {
     let mut top_intersections = Vec::new();
     let mut right_intersections = Vec::new();
     let mut bottom_intersections = Vec::new();
@@ -99,7 +99,8 @@ pub fn calculate_direct_los(
         los_ring.is_closed(),
         "The resulting line of sight ring is not closed (Begin and end coordinate are not equal)"
     );
-    los_ring
+    let polygon = Polygon::new(los_ring, vec![]);
+    polygon
 }
 
 /// Generate a linestring that will return the line of sight from the pov point, the pov can look
@@ -109,7 +110,7 @@ pub fn calculate_direct_los(
 /// compare line 1 with line 2, then 3 then 4 etc. get intersections
 /// if two lines intersect, the intersection point is always closer to the starting point compared
 /// to the end point
-pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> LineString {
+pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> Polygon {
     todo!("Implement this function")
 }
 
@@ -133,7 +134,7 @@ pub fn get_line_segments(line_of_sight_elements: &Vec<Vec<Coordinate>>) -> Vec<L
 /// closest to the start point of the line. the `skip` variable determines how many intersection points to skip
 /// from closest to the start point of the line. The last intersection point will always be the end point of
 /// the input line (i.e. the edge of the image). If this intersection point is logically skipped it will return None
-fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Option<Coord> {
+pub fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Option<Coord> {
     // distances times PRECISION: so PRECISION precision points per square
     let mut all_intersections: HashMap<i64, Coord> = HashMap::new();
     let mut distances: Vec<i64> = Vec::new();
@@ -179,6 +180,7 @@ fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) -> Opt
     distances.push(edge_distance);
     all_intersections.insert(edge_distance, line.end);
 
+    distances.sort();
     let key = match distances.get(skip) {
         Some(k) => k,
         None => return None,

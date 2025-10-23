@@ -5,11 +5,8 @@ use crate::{
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{Coord, LineString};
-use image::{
-    save_buffer, DynamicImage, ExtendedColorType, GenericImageView, ImageBuffer, ImageReader, Rgba,
-    RgbaImage,
-};
+use geo::{Coord, Distance, Euclidean, Polygon};
+use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use std::{
     f64,
@@ -24,7 +21,7 @@ pub struct VTTPartial {
     format: f32,
     resolution: Resolution,
     line_of_sight: Vec<Vec<Coordinate>>,
-    objects_line_of_sight: Vec<Vec<Coordinate>>,
+    objects_line_of_sight: Option<Vec<Vec<Coordinate>>>,
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
@@ -37,7 +34,7 @@ pub struct VTT {
     format: f32,
     resolution: Resolution,
     line_of_sight: Vec<Vec<Coordinate>>,
-    objects_line_of_sight: Vec<Vec<Coordinate>>,
+    objects_line_of_sight: Option<Vec<Vec<Coordinate>>>,
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
@@ -208,27 +205,14 @@ impl VTT {
         }
         // Check if the coordinate is not on a wall line
         let wall_segments = get_line_segments(&self.line_of_sight);
+        let pov_coord: Coord = pov.into();
         for wall in &wall_segments {
-            // to find if point (x,y) is on the slope of line with start (x1, y1) and end (x2, y2)
-            // use the following equation:
-            // (y-y1)*(x2-x1)=(y2-y1)*(x-x1)
-            let x1 = wall.start_point().x();
-            let y1 = wall.start_point().y();
-            let x2 = wall.end_point().x();
-            let y2 = wall.end_point().y();
-            if (pov.y - y1) * (x2 - x1) != (y2 - y1) * (pov.x - x1) {
-                continue;
+            if Euclidean::distance(wall, pov_coord) < 1e-9 {
+                return Err(RustVttError::InvalidPoint { coordinate: pov });
             }
-            if pov.x <= x1.min(x2) || x1.max(x1) <= pov.x {
-                continue;
-            }
-            if pov.y <= y1.min(y2) || y1.max(y1) <= pov.y {
-                continue;
-            }
-            return Err(RustVttError::InvalidPoint { coordinate: pov });
         }
 
-        let line_of_sight_polygon: LineString;
+        let mut line_of_sight_polygon: Polygon;
         if around_walls {
             line_of_sight_polygon = calculate_indirect_los(pov, &wall_segments);
         } else {
@@ -236,6 +220,13 @@ impl VTT {
                 calculate_direct_los(pov, &wall_segments, self.origin(), self.size());
         }
 
+        let ppg = self.pixels_per_grid() as f64;
+        line_of_sight_polygon.exterior_mut(|f| {
+            f.coords_mut().for_each(|f| {
+                f.x = (f.x * ppg).round();
+                f.y = (f.y * ppg).round();
+            })
+        });
         self.fog_of_war.update(operation, &line_of_sight_polygon);
 
         Ok(())
@@ -248,7 +239,9 @@ impl VTT {
         let rectangles = self.fog_of_war.get_rectangles();
         for rectangle in rectangles {
             rectangle.for_each_pixel(&mut |x, y| {
-                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                if x < image.width() && y < image.height() {
+                    image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                }
             });
         }
         image
@@ -290,6 +283,7 @@ impl VTT {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::open_vtt;
 
     #[test]
@@ -340,18 +334,38 @@ mod tests {
 
     #[test]
     fn vtt_save_img() {
-        let vtt = open_vtt("tests/resources/The Pig and Whistle tavern.uvtt")
-            .expect("Could not open file the pig and whistle tavern.uvtt");
+        let vtt =
+            open_vtt("tests/resources/tavern.uvtt").expect("Could not open file the tavern.uvtt");
         vtt.save_img_raw("tests/resources/tavern.png")
             .expect("Failed to save to png");
     }
 
     #[test]
+    fn vtt_save_small_img() {
+        let vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
+        vtt.save_img_raw("tests/resources/small.png")
+            .expect("Failed to save to png");
+    }
+
+    #[test]
     fn vtt_fow_hide_all() {
-        let mut vtt = open_vtt("tests/resources/The Pig and Whistle tavern.uvtt")
-            .expect("Could not open file the pig and whistle tavern.uvtt");
+        let mut vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
         vtt.fow_hide_all();
         vtt.save_img("tests/resources/black.png")
+            .expect("Could not save the image to png")
+    }
+
+    #[test]
+    fn vtt_fow_direct_los() {
+        let mut vtt = open_vtt("tests/resources/example4.dd2vtt")
+            .expect("Could not open file the example4.dd2vtt");
+        vtt.fow_hide_all();
+        let pov = Coordinate { x: 4.0, y: 7.0 };
+        vtt.fow_change(pov, false, Operation::SHOW)
+            .expect("Could not update fow");
+        vtt.save_img("tests/resources/los.png")
             .expect("Could not save the image to png")
     }
 }
