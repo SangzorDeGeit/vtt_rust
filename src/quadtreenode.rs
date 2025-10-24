@@ -1,15 +1,20 @@
-use geo::Area;
-use geo::BooleanOps;
-use geo::Coord;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
 use geo::Polygon;
-use geo::Rect;
 
 use crate::errors::RustVttError;
+use crate::fowrectangle::FoWRectangle;
 use crate::vtt::PixelCoordinate;
 use crate::vtt::Resolution;
 
-/// should not be smaller then 3
-const MIN_SQUARE_SIZE: i32 = 3;
+pub enum InLineString {
+    INSIDE,
+    OUTSIDE,
+    PARTIAL,
+}
+
 #[derive(Debug, Clone)]
 pub enum QuadtreeNode {
     Leaf {
@@ -22,19 +27,6 @@ pub enum QuadtreeNode {
         bottomleft: Box<QuadtreeNode>,
         bottomright: Box<QuadtreeNode>,
     },
-}
-
-// One rectangle within the quad tree represented by 4 corner nodes
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub struct FoWRectangle {
-    topleft: PixelCoordinate,
-    bottomright: PixelCoordinate,
-}
-
-pub enum InLineString {
-    INSIDE,
-    OUTSIDE,
-    PARTIAL,
 }
 
 impl QuadtreeNode {
@@ -102,22 +94,37 @@ impl QuadtreeNode {
     /// Given a line of sight polygon and an operation this function will create a tree that
     /// reveals or hides the part of the polygon. The input to this function should be a completely
     /// hidden (visible=false) or completely shown (visible=true) root node.
-    pub fn create_tree(&mut self, make_visible: bool, polygon: &Polygon) {
+    pub fn create_tree(
+        &mut self,
+        make_visible: bool,
+        polygon: &Polygon,
+        rect_counter: Arc<AtomicUsize>,
+    ) {
         match self {
             Self::Leaf { bounds, visible } => match bounds.in_polygon(polygon) {
                 InLineString::INSIDE => {
                     *visible = make_visible;
+                    if *visible {
+                        rect_counter.fetch_sub(1, Ordering::Relaxed);
+                    } else {
+                        rect_counter.fetch_add(1, Ordering::Relaxed);
+                    }
                     return;
                 }
                 InLineString::OUTSIDE => {
                     *visible = !make_visible;
+                    if *visible {
+                        rect_counter.fetch_sub(1, Ordering::Relaxed);
+                    } else {
+                        rect_counter.fetch_add(1, Ordering::Relaxed);
+                    }
                     return;
                 }
                 InLineString::PARTIAL => {
                     if let Err(_) = self.to_internal() {
                         return;
                     }
-                    self.create_tree(make_visible, polygon);
+                    self.create_tree(make_visible, polygon, rect_counter);
                     return;
                 }
             },
@@ -127,17 +134,17 @@ impl QuadtreeNode {
                 bottomleft,
                 bottomright,
             } => {
-                topleft.create_tree(make_visible, polygon);
-                topright.create_tree(make_visible, polygon);
-                bottomleft.create_tree(make_visible, polygon);
-                bottomright.create_tree(make_visible, polygon);
+                topleft.create_tree(make_visible, polygon, rect_counter.clone());
+                topright.create_tree(make_visible, polygon, rect_counter.clone());
+                bottomleft.create_tree(make_visible, polygon, rect_counter.clone());
+                bottomright.create_tree(make_visible, polygon, rect_counter.clone());
                 return;
             }
         };
     }
 
     /// Add fog of war represented by other to self
-    pub fn hide(&mut self, other: &Self) {
+    pub fn hide(&mut self, other: &Self, rect_counter: Arc<AtomicUsize>) {
         use QuadtreeNode as Q;
         match (&mut *self, other) {
             (
@@ -152,6 +159,7 @@ impl QuadtreeNode {
             ) => {
                 if *visible_self && !visible_other {
                     *visible_self = false;
+                    rect_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 return;
             }
@@ -161,15 +169,19 @@ impl QuadtreeNode {
                 }
                 self.to_internal()
                     .expect("expected self to be able to split");
-                self.hide(other);
+                self.hide(other, rect_counter);
             }
             (Q::Internal { .. }, Q::Leaf { visible, .. }) => {
+                let mut count = 0;
+                self.hidden_children(&mut count);
+                rect_counter.fetch_sub(count, Ordering::Relaxed);
                 if !visible {
                     *self = Self::Leaf {
                         bounds: self.get_area(),
                         visible: false,
                     };
                 }
+                rect_counter.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             (
@@ -186,16 +198,16 @@ impl QuadtreeNode {
                     bottomright: br_other,
                 },
             ) => {
-                tl_self.hide(tl_other);
-                tr_self.hide(tr_other);
-                bl_self.hide(bl_other);
-                br_self.hide(br_other);
+                tl_self.hide(tl_other, rect_counter.clone());
+                tr_self.hide(tr_other, rect_counter.clone());
+                bl_self.hide(bl_other, rect_counter.clone());
+                br_self.hide(br_other, rect_counter.clone());
             }
         }
     }
 
     /// Remove fog of war represented by other from self
-    pub fn show(&mut self, other: &Self) {
+    pub fn show(&mut self, other: &Self, rect_counter: Arc<AtomicUsize>) {
         use QuadtreeNode as Q;
         match (&mut *self, other) {
             (
@@ -210,6 +222,7 @@ impl QuadtreeNode {
             ) => {
                 if !*visible_self && *visible_other {
                     *visible_self = true;
+                    rect_counter.fetch_sub(1, Ordering::Relaxed);
                 }
                 return;
             }
@@ -219,9 +232,12 @@ impl QuadtreeNode {
                 }
                 self.to_internal()
                     .expect("expected self to be able to split");
-                self.show(other);
+                self.show(other, rect_counter);
             }
             (Q::Internal { .. }, Q::Leaf { visible, .. }) => {
+                let mut count = 0;
+                self.hidden_children(&mut count);
+                rect_counter.fetch_sub(count, Ordering::Relaxed);
                 if *visible {
                     *self = Self::Leaf {
                         bounds: self.get_area(),
@@ -244,17 +260,17 @@ impl QuadtreeNode {
                     bottomright: br_other,
                 },
             ) => {
-                tl_self.show(tl_other);
-                tr_self.show(tr_other);
-                bl_self.show(bl_other);
-                br_self.show(br_other);
+                tl_self.show(tl_other, rect_counter.clone());
+                tr_self.show(tr_other, rect_counter.clone());
+                bl_self.show(bl_other, rect_counter.clone());
+                br_self.show(br_other, rect_counter.clone());
             }
         }
     }
 
     /// Creates bigger quadtree squares when possible, if all leaf nodes have the same visibility
     /// modifier
-    pub fn clean(&mut self) {
+    pub fn clean(&mut self, rect_counter: Arc<AtomicUsize>) {
         match self {
             Self::Internal {
                 topleft,
@@ -262,10 +278,10 @@ impl QuadtreeNode {
                 bottomleft,
                 bottomright,
             } => {
-                topleft.clean();
-                topright.clean();
-                bottomleft.clean();
-                bottomright.clean();
+                topleft.clean(rect_counter.clone());
+                topright.clean(rect_counter.clone());
+                bottomleft.clean(rect_counter.clone());
+                bottomright.clean(rect_counter.clone());
                 let n1 = match topleft.visible() {
                     Ok(n) => n,
                     Err(_) => return,
@@ -292,7 +308,8 @@ impl QuadtreeNode {
                     *self = Self::Leaf {
                         bounds: self.get_area(),
                         visible: false,
-                    }
+                    };
+                    rect_counter.fetch_sub(3, Ordering::Relaxed);
                 }
             }
             Self::Leaf { .. } => return,
@@ -329,189 +346,27 @@ impl QuadtreeNode {
             QuadtreeNode::Internal { .. } => Err(RustVttError::InvalidInput),
         }
     }
-}
 
-impl FoWRectangle {
-    /// Create a new rectangle from a start and end point
-    pub fn new(topleft: PixelCoordinate, bottomright: PixelCoordinate) -> Self {
-        Self {
-            topleft,
-            bottomright,
-        }
-    }
-
-    /// create a rectangle from the map resolution, this function creates the initial root square
-    /// in the quad tree.
-    pub fn from_resolution(resolution: &Resolution) -> Self {
-        Self {
-            topleft: PixelCoordinate::from(&resolution.map_origin, resolution.pixels_per_grid),
-            bottomright: PixelCoordinate::from(&resolution.map_size, resolution.pixels_per_grid),
-        }
-    }
-
-    /// Checks whether the current rectangle is inside the linestring
-    pub fn in_polygon(&self, polygon: &Polygon) -> InLineString {
-        let rectangle = self.to_rectangle().to_polygon();
-        let intersection = polygon.intersection(&rectangle).unsigned_area();
-        let rectangle_area = rectangle.unsigned_area();
-        if (intersection / rectangle_area) > 0.9999 {
-            return InLineString::INSIDE;
-        }
-        if (intersection / rectangle_area) < 0.0001 {
-            return InLineString::OUTSIDE;
-        }
-        InLineString::PARTIAL
-    }
-
-    /// Turn FowRectangle into a geo::Rect
-    fn to_rectangle(&self) -> Rect {
-        let min: Coord = self.topleft.clone().into();
-        let max: Coord = self.bottomright.clone().into();
-        Rect::new(min, max)
-    }
-
-    /// Splits the given rectangle into four equally sized rectangles
-    fn split(
-        &self,
-    ) -> Result<(FoWRectangle, FoWRectangle, FoWRectangle, FoWRectangle), RustVttError> {
-        let width = self.bottomright.x - self.topleft.x;
-        let height = self.bottomright.y - self.topleft.y; // pixels count up from top to bottom of
-                                                          // the screen
-        if width < MIN_SQUARE_SIZE || height < MIN_SQUARE_SIZE {
-            return Err(RustVttError::MinimumRectangle {
-                rectangle: self.clone(),
-            });
-        }
-        let topleft_child = FoWRectangle {
-            topleft: self.topleft,
-            bottomright: PixelCoordinate::new(
-                self.topleft.x + (width / 2),
-                self.topleft.y + (height / 2),
-            ),
-        };
-        let topright_child = FoWRectangle {
-            topleft: PixelCoordinate::new(self.topleft.x + (width / 2) + 1, self.topleft.y),
-            bottomright: PixelCoordinate::new(self.bottomright.x, self.topleft.y + (height / 2)),
-        };
-        let bottomleft_child = FoWRectangle {
-            topleft: PixelCoordinate::new(self.topleft.x, self.topleft.y + (height / 2) + 1),
-            bottomright: PixelCoordinate::new(self.topleft.x + (width / 2), self.bottomright.y),
-        };
-        let bottomright_child = FoWRectangle {
-            topleft: PixelCoordinate::new(
-                self.topleft.x + (width / 2) + 1,
-                self.topleft.y + (height / 2) + 1,
-            ),
-            bottomright: self.bottomright,
-        };
-        Ok((
-            topleft_child,
-            topright_child,
-            bottomleft_child,
-            bottomright_child,
-        ))
-    }
-
-    /// Run a closure for each pixel in the rectangle
-    pub fn for_each_pixel<F: FnMut(u32, u32)>(&self, f: &mut F) {
-        for x in self.topleft.x..=self.bottomright.x {
-            for y in self.topleft.y..=self.bottomright.y {
-                f(x as u32, y as u32)
+    /// Update the given count for the amount of hidden children, also counts the current node if
+    /// hidden, so initial call should be with an internal node
+    fn hidden_children(&self, count: &mut usize) {
+        match self {
+            QuadtreeNode::Leaf { visible, .. } => {
+                if !visible {
+                    *count += 1
+                }
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_normal_rectangle() {
-        let rect = FoWRectangle {
-            topleft: PixelCoordinate::new(0, 0),
-            bottomright: PixelCoordinate::new(10, 10),
-        };
-
-        let (tl, tr, bl, br) = rect.split().expect("split should succeed");
-
-        // Top-left child
-        assert_eq!(
-            tl,
-            FoWRectangle {
-                topleft: PixelCoordinate::new(0, 0),
-                bottomright: PixelCoordinate::new(5, 5),
+            QuadtreeNode::Internal {
+                topleft,
+                topright,
+                bottomleft,
+                bottomright,
+            } => {
+                topleft.hidden_children(count);
+                topright.hidden_children(count);
+                bottomleft.hidden_children(count);
+                bottomright.hidden_children(count);
             }
-        );
-
-        // Top-right child
-        assert_eq!(
-            tr,
-            FoWRectangle {
-                topleft: PixelCoordinate::new(6, 0),
-                bottomright: PixelCoordinate::new(10, 5),
-            }
-        );
-
-        // Bottom-left child
-        assert_eq!(
-            bl,
-            FoWRectangle {
-                topleft: PixelCoordinate::new(0, 6),
-                bottomright: PixelCoordinate::new(5, 10),
-            }
-        );
-
-        // Bottom-right child
-        assert_eq!(
-            br,
-            FoWRectangle {
-                topleft: PixelCoordinate::new(6, 6),
-                bottomright: PixelCoordinate::new(10, 10),
-            }
-        );
-    }
-
-    #[test]
-    fn split_odd_size_rectangle() {
-        // width and height are 11 pixels
-        let rect = FoWRectangle {
-            topleft: PixelCoordinate::new(0, 0),
-            bottomright: PixelCoordinate::new(11, 11),
-        };
-
-        let (tl, tr, bl, _br) = rect.split().expect("split should succeed");
-
-        // Verify that the resulting rectangles are roughly equal size
-        let width_tl = tl.bottomright.x - tl.topleft.x;
-        let width_tr = tr.bottomright.x - tr.topleft.x;
-        let height_tl = tl.bottomright.y - tl.topleft.y;
-        let height_bl = bl.bottomright.y - bl.topleft.y;
-
-        assert!(
-            (width_tl - width_tr).abs() <= 1,
-            "Widths differ by more than 1: {width_tl} vs {width_tr}"
-        );
-        assert!(
-            (height_tl - height_bl).abs() <= 1,
-            "Heights differ by more than 1: {height_tl} vs {height_bl}"
-        );
-    }
-
-    #[test]
-    fn split_minimum_size_error() {
-        // Only 1 pixel wide/high
-        let rect = FoWRectangle {
-            topleft: PixelCoordinate::new(0, 0),
-            bottomright: PixelCoordinate::new(1, 1),
-        };
-
-        let result = rect.split();
-        match result {
-            Err(RustVttError::MinimumRectangle { rectangle }) => {
-                assert_eq!(rectangle.topleft, PixelCoordinate::new(0, 0));
-            }
-            other => panic!("Expected MinimumRectangle error, got {:?}", other),
         }
     }
 }

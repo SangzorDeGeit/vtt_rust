@@ -1,6 +1,7 @@
 use thiserror::{self, Error};
 
-use crate::{quadtreenode::FoWRectangle, vtt::Coordinate};
+use crate::fowrectangle::FoWRectangle;
+use crate::vtt::Coordinate;
 
 #[derive(Error, Debug)]
 pub enum RustVttError {

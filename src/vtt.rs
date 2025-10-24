@@ -1,12 +1,14 @@
 use crate::{
     errors::RustVttError,
     fog_of_war::{FogOfWar, Operation},
-    helper::{calculate_direct_los, calculate_indirect_los, get_line_segments},
+    helper::{calculate_direct_los, calculate_indirect_los},
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{Coord, Distance, Euclidean, Polygon};
-use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgba, RgbaImage};
+use geo::{Coord, Distance, Euclidean, Line, Polygon};
+use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgb, RgbImage};
+use imageproc::drawing;
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
     f64,
@@ -43,7 +45,7 @@ pub struct VTT {
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct Resolution {
     pub map_origin: Coordinate,
     pub map_size: Coordinate,
@@ -107,8 +109,8 @@ impl PixelCoordinate {
     }
 }
 
-impl Into<Coord> for PixelCoordinate {
-    fn into(self) -> Coord {
+impl PixelCoordinate {
+    pub fn as_coord(self) -> Coord {
         Coord {
             x: self.x as f64,
             y: self.y as f64,
@@ -116,8 +118,8 @@ impl Into<Coord> for PixelCoordinate {
     }
 }
 
-impl Into<Coord> for Coordinate {
-    fn into(self) -> Coord {
+impl Coordinate {
+    pub fn as_coord(self) -> Coord {
         Coord {
             x: self.x,
             y: self.y,
@@ -128,7 +130,7 @@ impl Into<Coord> for Coordinate {
 impl VTTPartial {
     /// Convert the partial vtt to a vtt struct that contains fog of war
     pub fn to_vtt(self) -> VTT {
-        let fog_of_war = FogOfWar::new(self.resolution.clone());
+        let fog_of_war = FogOfWar::new(self.resolution);
         VTT {
             format: self.format,
             resolution: self.resolution,
@@ -190,11 +192,14 @@ impl VTT {
     /// ## `around_walls`
     /// Whether the person at the pov point can look around walls perfectly. When false, this will
     /// function as a 'line of sight' fog of war update.
+    /// ## `through_objects`
+    /// Whether to let the vision go through objects defined in objects_line_of_sight
     pub fn fow_change(
         &mut self,
         pov: Coordinate,
         around_walls: bool,
         operation: Operation,
+        through_objects: bool,
     ) -> Result<(), RustVttError> {
         // First check if the given coordinate is not on or out of the bounds of the grid
         if pov.x <= self.origin().x || self.size().x <= pov.x {
@@ -204,8 +209,8 @@ impl VTT {
             return Err(RustVttError::OutOfBounds { coordinate: pov });
         }
         // Check if the coordinate is not on a wall line
-        let wall_segments = get_line_segments(&self.line_of_sight);
-        let pov_coord: Coord = pov.into();
+        let wall_segments = self.get_line_segments(!through_objects);
+        let pov_coord: Coord = pov.as_coord();
         for wall in &wall_segments {
             if Euclidean::distance(wall, pov_coord) < 1e-9 {
                 return Err(RustVttError::InvalidPoint { coordinate: pov });
@@ -227,6 +232,7 @@ impl VTT {
                 f.y = (f.y * ppg).round();
             })
         });
+
         self.fog_of_war.update(operation, &line_of_sight_polygon);
 
         Ok(())
@@ -234,17 +240,75 @@ impl VTT {
 
     /// Apply the current fog of war to the image, painting every fog of war covered pixel black
     /// and returning the updated image
-    fn apply_fow(&self, image: &DynamicImage) -> RgbaImage {
-        let mut image = image.to_rgba8();
-        let rectangles = self.fog_of_war.get_rectangles();
-        for rectangle in rectangles {
-            rectangle.for_each_pixel(&mut |x, y| {
-                if x < image.width() && y < image.height() {
-                    image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
-                }
-            });
+    fn apply_fow(&self, image: &DynamicImage) -> RgbImage {
+        let mut image = image.to_rgb8();
+        println!("getting rectangles");
+        let rectangles: Vec<imageproc::rect::Rect> = self
+            .fog_of_war
+            .get_rectangles()
+            .par_iter_mut()
+            .map(|x| x.as_rect())
+            .collect();
+        println!("Starting draw");
+        for rect in rectangles {
+            drawing::draw_filled_rect_mut(&mut image, rect, Rgb([0, 0, 0]));
         }
         image
+    }
+
+    /// Get all lines in the vtt that block line of sight. Any line segment with multiple
+    /// coordinates will be split into seperate lines for streamlined formatting. Portals will be
+    /// included if their closed field is true.
+    /// ## `objects`
+    /// Whether to include 'objects_line_of_sight' in the result
+    /// ## panics
+    /// if a portal is closed but has no bounds
+    pub fn get_line_segments(&self, objects: bool) -> Vec<Line> {
+        let mut all_lines: Vec<Line> = Vec::new();
+
+        for line in &self.line_of_sight {
+            let mut prev_point: Option<Coord> = None;
+            for point in line {
+                if let Some(prev) = prev_point {
+                    all_lines.push(Line::new(prev, point.as_coord()));
+                }
+                prev_point = Some(point.as_coord());
+            }
+        }
+
+        for portal in &self.portals {
+            if portal.closed {
+                let start = portal
+                    .bounds
+                    .get(0)
+                    .expect("expected an start bound for portal");
+                let end = portal
+                    .bounds
+                    .get(1)
+                    .expect("expected an end bound for portal");
+                all_lines.push(Line::new(start.as_coord(), end.as_coord()));
+            }
+        }
+
+        if !objects {
+            return all_lines;
+        }
+        let objects_line_of_sight = match &self.objects_line_of_sight {
+            Some(o) => o,
+            None => return all_lines,
+        };
+
+        for line in objects_line_of_sight {
+            let mut prev_point: Option<Coord> = None;
+            for point in line {
+                if let Some(prev) = prev_point {
+                    all_lines.push(Line::new(prev, point.as_coord()));
+                }
+                prev_point = Some(point.as_coord());
+            }
+        }
+
+        all_lines
     }
 
     /// Save the base64 encoded image of this vtt to a .png file.
@@ -265,17 +329,19 @@ impl VTT {
 
     /// Apply all vtt data (fog of war, lighting, etc.) to the image stored in this vtt and save it to a .png file.
     pub fn save_img<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        println!("saving image");
         let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
         let img = ImageReader::new(Cursor::new(decoded))
             .with_guessed_format()?
             .decode()?;
         let img = self.apply_fow(&img);
+        println!("saving buffer");
         save_buffer(
             path,
             &img,
             img.width(),
             img.height(),
-            ExtendedColorType::Rgba8,
+            ExtendedColorType::Rgb8,
         )?;
         Ok(())
     }
@@ -363,7 +429,7 @@ mod tests {
             .expect("Could not open file the example4.dd2vtt");
         vtt.fow_hide_all();
         let pov = Coordinate { x: 4.0, y: 7.0 };
-        vtt.fow_change(pov, false, Operation::SHOW)
+        vtt.fow_change(pov, false, Operation::SHOW, true)
             .expect("Could not update fow");
         vtt.save_img("tests/resources/los.png")
             .expect("Could not save the image to png")

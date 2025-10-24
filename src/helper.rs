@@ -114,22 +114,6 @@ pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> Pol
     todo!("Implement this function")
 }
 
-/// Given a line_of_sight parameter this will return a Vec of all line segments
-/// This function is used to streamline the wall segments data of vtt files
-pub fn get_line_segments(line_of_sight_elements: &Vec<Vec<Coordinate>>) -> Vec<Line> {
-    let mut all_lines: Vec<Line> = Vec::new();
-    for line in line_of_sight_elements {
-        let mut prev_point: Option<Coord> = None;
-        for point in line {
-            if let Some(prev) = prev_point {
-                all_lines.push(Line::new(prev, point.clone().into()));
-            }
-            prev_point = Some(point.clone().into());
-        }
-    }
-    all_lines
-}
-
 /// Given a line and an array of wall segments, this function will return the intersection point
 /// closest to the start point of the line. the `skip` variable determines how many intersection points to skip
 /// from closest to the start point of the line. The last intersection point will always be the end point of
@@ -195,97 +179,6 @@ pub fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) ->
 fn distance(c1: &Coord, c2: &Coord) -> f64 {
     //sqrt[(|x1-x2|^2) + (|y1-y2|^2)]
     return ((c1.x - c2.x).abs().powi(2) + (c1.y - c2.y).abs().powi(2)).sqrt();
-}
-
-#[cfg(test)]
-mod test_get_line_segments {
-    use crate::helper::get_line_segments;
-    use crate::vtt::Coordinate;
-    use geo::Line;
-
-    #[test]
-    fn test_empty_input() {
-        let input: Vec<Vec<Coordinate>> = vec![];
-        let result = get_line_segments(&input);
-        assert_eq!(result, vec![], "Expected no lines for empty input");
-    }
-
-    #[test]
-    fn test_single_segment() {
-        let input = vec![vec![
-            Coordinate { x: 0.0, y: 0.0 },
-            Coordinate { x: 1.0, y: 1.0 },
-        ]];
-        let expected = vec![Line::new(
-            Coordinate { x: 0.0, y: 0.0 },
-            Coordinate { x: 1.0, y: 1.0 },
-        )];
-        let result = get_line_segments(&input);
-        assert_eq!(result, expected, "Expected a single line segment");
-    }
-
-    #[test]
-    fn test_multiple_segments_in_one_list() {
-        let input = vec![vec![
-            Coordinate { x: 0.0, y: 0.0 },
-            Coordinate { x: 1.0, y: 1.0 },
-            Coordinate { x: 2.0, y: 2.0 },
-        ]];
-        let expected = vec![
-            Line::new(Coordinate { x: 0.0, y: 0.0 }, Coordinate { x: 1.0, y: 1.0 }),
-            Line::new(Coordinate { x: 1.0, y: 1.0 }, Coordinate { x: 2.0, y: 2.0 }),
-        ];
-        let result = get_line_segments(&input);
-        assert_eq!(result, expected, "Expected multiple segments from one list");
-    }
-
-    #[test]
-    fn test_multiple_lists() {
-        let input = vec![
-            vec![Coordinate { x: 0.0, y: 0.0 }, Coordinate { x: 1.0, y: 1.0 }],
-            vec![Coordinate { x: 2.0, y: 2.0 }, Coordinate { x: 3.0, y: 3.0 }],
-        ];
-        let expected = vec![
-            Line::new(Coordinate { x: 0.0, y: 0.0 }, Coordinate { x: 1.0, y: 1.0 }),
-            Line::new(Coordinate { x: 2.0, y: 2.0 }, Coordinate { x: 3.0, y: 3.0 }),
-        ];
-        let result = get_line_segments(&input);
-        assert_eq!(result, expected, "Expected segments from multiple lists");
-    }
-
-    #[test]
-    fn test_single_point_list() {
-        let input = vec![vec![Coordinate { x: 0.0, y: 0.0 }]];
-        let result = get_line_segments(&input);
-        assert_eq!(
-            result,
-            vec![],
-            "Expected no segments for a single-point list"
-        );
-    }
-
-    #[test]
-    fn test_mixed_lists() {
-        let input = vec![
-            vec![Coordinate { x: 0.0, y: 0.0 }, Coordinate { x: 1.0, y: 1.0 }],
-            vec![Coordinate { x: 2.0, y: 2.0 }],
-            vec![
-                Coordinate { x: 3.0, y: 3.0 },
-                Coordinate { x: 4.0, y: 4.0 },
-                Coordinate { x: 5.0, y: 5.0 },
-            ],
-        ];
-        let expected = vec![
-            Line::new(Coordinate { x: 0.0, y: 0.0 }, Coordinate { x: 1.0, y: 1.0 }),
-            Line::new(Coordinate { x: 3.0, y: 3.0 }, Coordinate { x: 4.0, y: 4.0 }),
-            Line::new(Coordinate { x: 4.0, y: 4.0 }, Coordinate { x: 5.0, y: 5.0 }),
-        ];
-        let result = get_line_segments(&input);
-        assert_eq!(
-            result, expected,
-            "Expected segments for mixed lists with varying points"
-        );
-    }
 }
 
 #[cfg(test)]

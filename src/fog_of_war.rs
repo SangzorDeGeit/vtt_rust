@@ -3,15 +3,20 @@
 //! of the square is visible. Normally this struct is accessed via the VTT implementation, but you
 //! can also use this struct directly for more control over the fog of war.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use geo::Polygon;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
-use crate::quadtreenode::{FoWRectangle, InLineString, QuadtreeNode};
+use crate::fowrectangle::FoWRectangle;
+use crate::quadtreenode::{InLineString, QuadtreeNode};
 use crate::vtt::{PixelCoordinate, Resolution};
 
 #[derive(Debug, Clone)]
 pub struct FogOfWar {
     squares: Vec<FowNode>,
+    rectangle_count: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,17 +66,27 @@ impl FogOfWar {
             x = pixel_origin.x;
             y += resolution.pixels_per_grid;
         }
-        Self { squares }
+        Self {
+            squares,
+            rectangle_count: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Set the fog of war area to hide everyting
     pub fn hide_all(&mut self) {
-        self.squares.iter_mut().for_each(|f| f.hide());
+        let amount = self.squares.len();
+        self.squares.iter_mut().for_each(|f| {
+            f.hide();
+        });
+        self.rectangle_count.swap(amount, Ordering::Relaxed);
     }
 
     /// Set the fog of war area to visible
     pub fn show_all(&mut self) {
-        self.squares.iter_mut().for_each(|f| f.show());
+        self.squares.iter_mut().for_each(|f| {
+            f.show();
+        });
+        self.rectangle_count.swap(0, Ordering::Relaxed);
     }
 
     /// Update the fog of war according to a given polygon
@@ -82,13 +97,14 @@ impl FogOfWar {
         };
         self.squares
             .par_iter_mut()
-            .for_each(|f| f.update(polygon, make_visible));
+            .for_each(|f| f.update(polygon, make_visible, self.rectangle_count.clone()));
     }
 
     /// Gets all rectangles covered by fog of war
     pub fn get_rectangles(&self) -> Vec<FoWRectangle> {
-        let vec: Vec<Vec<FoWRectangle>> = self.squares.iter().map(|f| f.rectangles()).collect();
-        let vec: Vec<FoWRectangle> = vec.into_iter().flatten().collect();
+        let mut vec: Vec<FoWRectangle> =
+            Vec::with_capacity(self.rectangle_count.load(Ordering::Relaxed));
+        self.squares.iter().for_each(|f| f.rectangles(&mut vec));
         vec
     }
 }
@@ -114,36 +130,48 @@ impl FowNode {
 
     /// Update this node according to the polygon and if the polygon makes areas visible
     /// Example: if make_visible is false the polygon represents addition of fog of war
-    pub fn update(&mut self, polygon: &Polygon, make_visible: bool) {
+    pub fn update(
+        &mut self,
+        polygon: &Polygon,
+        make_visible: bool,
+        rect_counter: Arc<AtomicUsize>,
+    ) {
         use InLineString as I;
         match self.rect.in_polygon(polygon) {
             I::INSIDE => {
                 if make_visible {
                     self.show();
+                    rect_counter.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.hide();
+                    rect_counter.fetch_sub(1, Ordering::Relaxed);
                 }
             }
             I::OUTSIDE => (),
             I::PARTIAL => {
-                self.partial(make_visible, polygon);
+                self.partial(make_visible, polygon, rect_counter);
             }
         }
     }
 
     /// Sets the state of the current node to partial and sets the quadtree according to a given
     /// polygon and visibility
-    pub fn partial(&mut self, make_visible: bool, polygon: &Polygon) {
+    pub fn partial(
+        &mut self,
+        make_visible: bool,
+        polygon: &Polygon,
+        rect_counter: Arc<AtomicUsize>,
+    ) {
         let mut quad_tree = QuadtreeNode::from_bounds(self.rect, !make_visible);
-        quad_tree.create_tree(make_visible, &polygon);
+        quad_tree.create_tree(make_visible, &polygon, rect_counter.clone());
         match &mut self.state {
             FowState::Partial { node } => {
                 if make_visible {
-                    node.show(&quad_tree);
-                    node.clean();
+                    node.show(&quad_tree, rect_counter.clone());
+                    node.clean(rect_counter);
                 } else {
-                    node.hide(&quad_tree);
-                    node.clean();
+                    node.hide(&quad_tree, rect_counter.clone());
+                    node.clean(rect_counter);
                 }
             }
             _ => {
@@ -152,14 +180,12 @@ impl FowNode {
         }
     }
 
-    /// Return all rectangles covered by fog of war in this node
-    pub fn rectangles(&self) -> Vec<FoWRectangle> {
-        let mut rectangle_vec: Vec<FoWRectangle> = Vec::new();
+    /// Update given vec adding all rectangles covered by fog of war in this node
+    pub fn rectangles(&self, vec: &mut Vec<FoWRectangle>) {
         match &self.state {
-            FowState::Partial { node } => node.populate_rectangle_vec(&mut rectangle_vec),
-            FowState::Hidden => rectangle_vec.push(self.rect),
+            FowState::Partial { node } => node.populate_rectangle_vec(vec),
+            FowState::Hidden => vec.push(self.rect),
             FowState::Shown => (),
         }
-        rectangle_vec
     }
 }
