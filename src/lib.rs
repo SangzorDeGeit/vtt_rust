@@ -21,6 +21,7 @@
 
 mod errors;
 pub mod fog_of_war;
+mod fowrectangle;
 mod helper;
 mod quadtreenode;
 pub mod vtt;
