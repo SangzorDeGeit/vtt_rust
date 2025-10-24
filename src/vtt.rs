@@ -429,7 +429,7 @@ mod tests {
             .expect("Could not open file the example4.dd2vtt");
         vtt.fow_hide_all();
         let pov = Coordinate { x: 4.0, y: 7.0 };
-        vtt.fow_change(pov, false, Operation::SHOW)
+        vtt.fow_change(pov, false, Operation::SHOW, true)
             .expect("Could not update fow");
         vtt.save_img("tests/resources/los.png")
             .expect("Could not save the image to png")
