@@ -5,6 +5,8 @@ use crate::vtt::Resolution;
 use geo::Area;
 use geo::BooleanOps;
 use geo::Coord;
+use geo::LinesIter;
+use geo::MultiPolygon;
 use geo::Polygon;
 use geo::Rect as georect;
 use imageproc::rect::Rect as imageprocrect;
@@ -37,15 +39,16 @@ impl FoWRectangle {
         }
     }
 
-    /// Checks whether the current rectangle is inside the linestring
+    /// Checks whether the current rectangle is inside the polygon, but not inside any interior
+    /// linestrings
     pub fn in_polygon(&self, polygon: &Polygon) -> InLineString {
         let rectangle = self.to_rectangle().to_polygon();
-        let intersection = polygon.intersection(&rectangle).unsigned_area();
+        let exterior_intersection = polygon.intersection(&rectangle).unsigned_area();
         let rectangle_area = rectangle.unsigned_area();
-        if (intersection / rectangle_area) > 0.9999 {
+        if (exterior_intersection / rectangle_area) > 0.9999 {
             return InLineString::INSIDE;
         }
-        if (intersection / rectangle_area) < 0.0001 {
+        if (exterior_intersection / rectangle_area) < 0.0001 {
             return InLineString::OUTSIDE;
         }
         InLineString::PARTIAL
@@ -106,15 +109,6 @@ impl FoWRectangle {
             bottomleft_child,
             bottomright_child,
         ))
-    }
-
-    /// Run a closure for each pixel in the rectangle
-    pub fn for_each_pixel<F: FnMut(u32, u32)>(&self, f: &mut F) {
-        for x in self.topleft.x..=self.bottomright.x {
-            for y in self.topleft.y..=self.bottomright.y {
-                f(x as u32, y as u32)
-            }
-        }
     }
 }
 
