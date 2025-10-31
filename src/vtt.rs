@@ -2,14 +2,10 @@ use crate::{
     errors::RustVttError,
     fog_of_war::{FogOfWar, Operation},
     helper::{self, create_polygon, distance, find_intersection},
-    vector::Vector,
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{
-    orient::Direction, Area, BooleanOps, Contains, Coord, Distance, Euclidean, Line, LineString,
-    MultiPolygon, Orient, Polygon,
-};
+use geo::{Area, BooleanOps, Contains, Coord, Distance, Euclidean, Line, LineString, Polygon};
 use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgb, RgbImage};
 use imageproc::drawing;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
