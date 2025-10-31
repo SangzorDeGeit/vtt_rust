@@ -1,21 +1,28 @@
 use crate::{
     errors::RustVttError,
     fog_of_war::{FogOfWar, Operation},
-    helper::{calculate_direct_los, calculate_indirect_los},
+    helper::{self, create_polygon, distance, find_intersection},
+    vector::Vector,
 };
 use anyhow::Result;
 use base64::{prelude::BASE64_STANDARD, Engine as _};
-use geo::{Coord, Distance, Euclidean, Line, Polygon};
+use geo::{
+    orient::Direction, Area, BooleanOps, Contains, Coord, Distance, Euclidean, Line, LineString,
+    MultiPolygon, Orient, Polygon,
+};
 use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgb, RgbImage};
 use imageproc::drawing;
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering,
     f64,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Cursor, Write},
     path::Path,
 };
+
+const STEP_SIZE: f64 = 0.2;
 
 /// A VTT struct containing all data that is in the .vtt file without fog of war.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -30,7 +37,8 @@ pub struct VTTPartial {
     image: String,
 }
 
-/// The main VTT structure containing all the data that is in the .vtt file.
+/// The main VTT structure containing all the data that is in the .vtt file including a fog of war
+/// field.
 #[derive(Debug, Clone)]
 pub struct VTT {
     format: f32,
@@ -80,7 +88,7 @@ pub struct Portal {
 }
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialOrd)]
 pub struct Coordinate {
     pub x: f64,
     pub y: f64,
@@ -119,10 +127,57 @@ impl PixelCoordinate {
 }
 
 impl Coordinate {
+    pub fn from_coord(coord: Coord) -> Self {
+        Self {
+            x: coord.x,
+            y: coord.y,
+        }
+    }
+
     pub fn as_coord(self) -> Coord {
         Coord {
             x: self.x,
             y: self.y,
+        }
+    }
+
+    /// Returns whether self is within one square of other
+    pub fn within_square(&self, other: &Coordinate) -> bool {
+        if other.x < self.x - 1. || self.x + 1. < other.x {
+            return false;
+        }
+        if other.y < self.y - 1. || self.y + 1. < other.y {
+            return false;
+        }
+        true
+    }
+}
+
+impl PartialEq for Coordinate {
+    fn eq(&self, other: &Self) -> bool {
+        if self.x.is_nan() || other.x.is_nan() || self.y.is_nan() || other.y.is_nan() {
+            panic!("Coordinate may not be NaN, undefined behaviour");
+        }
+        (self.x - other.x).abs() < 1e-9 && (self.y - other.y).abs() < 1e-9
+    }
+}
+
+impl Eq for Coordinate {}
+
+impl Ord for Coordinate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if (self.x - other.x) < 1e-9 {
+            if (self.y - other.y) < 1e-9 {
+                return Ordering::Equal;
+            } else if self.y < other.y {
+                return Ordering::Less;
+            } else {
+                return Ordering::Greater;
+            }
+        } else if self.x < other.x {
+            return Ordering::Less;
+        } else {
+            return Ordering::Greater;
         }
     }
 }
@@ -130,6 +185,24 @@ impl Coordinate {
 impl VTTPartial {
     /// Convert the partial vtt to a vtt struct that contains fog of war
     pub fn to_vtt(self) -> VTT {
+        assert!(
+            self.resolution.map_origin.x >= 0.0,
+            "Origin x must positive"
+        );
+        assert!(
+            self.resolution.map_origin.y >= 0.0,
+            "Origin y must be positive"
+        );
+        assert_eq!(
+            self.resolution.map_size.x.fract(),
+            0.0,
+            "The size must be a whole number"
+        );
+        assert_eq!(
+            self.resolution.map_size.y.fract(),
+            0.0,
+            "The size must be a whole number"
+        );
         let fog_of_war = FogOfWar::new(self.resolution);
         VTT {
             format: self.format,
@@ -169,6 +242,51 @@ impl VTT {
         return self.resolution.pixels_per_grid;
     }
 
+    /// Open a door at the specified position. The position does not have to be exact but should be
+    /// within one square of the position of a door. If multiple doors are within one square it
+    /// will pick the door closest to the given position. Returns whether a was door found at the given
+    /// position.
+    pub fn open_door(&mut self, position: Coordinate) -> bool {
+        let closest_door = self.portals.iter_mut().min_by(|x, y| {
+            let dx = distance(&x.position.as_coord(), &position.as_coord());
+            let dy = distance(&y.position.as_coord(), &position.as_coord());
+            dx.total_cmp(&dy)
+        });
+        if let Some(door) = closest_door {
+            if door.position.within_square(&position) {
+                door.closed = false;
+                return true;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// Close a door at the specified position. The position does not have to be exact but should be
+    /// within one square of the position of a door. If multiple doors are within one square it
+    /// will pick the door closest to the given position. Returns whether a door was found at the given
+    /// position.
+    pub fn close_door(&mut self, position: Coordinate) -> bool {
+        let closest_door = self.portals.iter_mut().min_by(|x, y| {
+            let dx = distance(&x.position.as_coord(), &position.as_coord());
+            let dy = distance(&y.position.as_coord(), &position.as_coord());
+            dx.total_cmp(&dy)
+        });
+        if let Some(door) = closest_door {
+            if door.position.within_square(&position) {
+                door.closed = true;
+                return true;
+            }
+            return false;
+        }
+        false
+    }
+
+    /// Apply ambient light and other light sources to given image
+    fn apply_light(&self, image: &DynamicImage) -> RgbImage {
+        todo!("apply light sources to image");
+    }
+
     /// Add fog of war to cover the entire image
     pub fn fow_hide_all(&mut self) {
         self.fog_of_war.hide_all();
@@ -185,8 +303,7 @@ impl VTT {
     }
 
     /// Given a coordinate on the image, this function should show or hide everything that a person
-    /// standing at this coordinate could see, any objects blocking line of sight (defined in the
-    /// objects_line_of_sight parameter) are disregarded.
+    /// standing at this coordinate could see.
     /// ## `pov`
     /// The coordinate at which the person you want to reveal area for is standing
     /// ## `around_walls`
@@ -197,8 +314,8 @@ impl VTT {
     pub fn fow_change(
         &mut self,
         pov: Coordinate,
-        around_walls: bool,
         operation: Operation,
+        around_walls: bool,
         through_objects: bool,
     ) -> Result<(), RustVttError> {
         // First check if the given coordinate is not on or out of the bounds of the grid
@@ -209,9 +326,9 @@ impl VTT {
             return Err(RustVttError::OutOfBounds { coordinate: pov });
         }
         // Check if the coordinate is not on a wall line
-        let wall_segments = self.get_line_segments(!through_objects);
+        let walls = self.get_line_segments(!through_objects);
         let pov_coord: Coord = pov.as_coord();
-        for wall in &wall_segments {
+        for wall in &walls {
             if Euclidean::distance(wall, pov_coord) < 1e-9 {
                 return Err(RustVttError::InvalidPoint { coordinate: pov });
             }
@@ -219,10 +336,9 @@ impl VTT {
 
         let mut line_of_sight_polygon: Polygon;
         if around_walls {
-            line_of_sight_polygon = calculate_indirect_los(pov, &wall_segments);
+            line_of_sight_polygon = self.calculate_indirect_los(pov, &walls)
         } else {
-            line_of_sight_polygon =
-                calculate_direct_los(pov, &wall_segments, self.origin(), self.size());
+            line_of_sight_polygon = self.calculate_direct_los(pov, &walls);
         }
 
         let ppg = self.pixels_per_grid() as f64;
@@ -230,30 +346,20 @@ impl VTT {
             f.coords_mut().for_each(|f| {
                 f.x = (f.x * ppg).round();
                 f.y = (f.y * ppg).round();
-            })
+            });
+        });
+        line_of_sight_polygon.interiors_mut(|r| {
+            r.iter_mut().for_each(|l| {
+                l.coords_mut().for_each(|c| {
+                    c.x = (c.x * ppg).round();
+                    c.y = (c.y * ppg).round();
+                });
+            });
         });
 
         self.fog_of_war.update(operation, &line_of_sight_polygon);
 
         Ok(())
-    }
-
-    /// Apply the current fog of war to the image, painting every fog of war covered pixel black
-    /// and returning the updated image
-    fn apply_fow(&self, image: &DynamicImage) -> RgbImage {
-        let mut image = image.to_rgb8();
-        println!("getting rectangles");
-        let rectangles: Vec<imageproc::rect::Rect> = self
-            .fog_of_war
-            .get_rectangles()
-            .par_iter_mut()
-            .map(|x| x.as_rect())
-            .collect();
-        println!("Starting draw");
-        for rect in rectangles {
-            drawing::draw_filled_rect_mut(&mut image, rect, Rgb([0, 0, 0]));
-        }
-        image
     }
 
     /// Get all lines in the vtt that block line of sight. Any line segment with multiple
@@ -329,13 +435,11 @@ impl VTT {
 
     /// Apply all vtt data (fog of war, lighting, etc.) to the image stored in this vtt and save it to a .png file.
     pub fn save_img<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        println!("saving image");
         let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
         let img = ImageReader::new(Cursor::new(decoded))
             .with_guessed_format()?
             .decode()?;
         let img = self.apply_fow(&img);
-        println!("saving buffer");
         save_buffer(
             path,
             &img,
@@ -344,6 +448,196 @@ impl VTT {
             ExtendedColorType::Rgb8,
         )?;
         Ok(())
+    }
+
+    /// Try to save the current vtt struct to the specified path, will overwrite the file if it
+    /// already existed. This will not save fog of war state
+    pub fn save_vtt<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let mut f = OpenOptions::new().write(true).truncate(true).open(path)?;
+        let json_string = serde_json::to_string(&self.to_partialvtt())?;
+        f.write_all(json_string.as_bytes())?;
+        Ok(())
+    }
+
+    /**
+     *
+     *
+     * ----------------------- Private functions -----------------------
+     *
+     *
+     **/
+
+    /// Apply the current fog of war to the image, painting every fog of war covered pixel black
+    /// and returning the updated image
+    fn apply_fow(&self, image: &DynamicImage) -> RgbImage {
+        let mut image = image.to_rgb8();
+        let rectangles: Vec<imageproc::rect::Rect> = self
+            .fog_of_war
+            .get_rectangles()
+            .par_iter_mut()
+            .map(|x| x.as_rect())
+            .collect();
+        for rect in rectangles {
+            drawing::draw_filled_rect_mut(&mut image, rect, Rgb([0, 0, 0]));
+        }
+        image
+    }
+
+    /// Convert to a vtt partial struct which does not contain fog of war
+    fn to_partialvtt(&self) -> VTTPartial {
+        VTTPartial {
+            format: self.format,
+            resolution: self.resolution,
+            line_of_sight: self.line_of_sight.clone(),
+            objects_line_of_sight: self.objects_line_of_sight.clone(),
+            portals: self.portals.clone(),
+            environment: self.environment.clone(),
+            lights: self.lights.clone(),
+            image: self.image.clone(),
+        }
+    }
+
+    /// Generate a Polygon representing the area that the pov can see. This vision is
+    /// blocked by walls
+    fn calculate_direct_los(&self, pov: Coordinate, walls: &Vec<Line>) -> Polygon {
+        let mut intersections: Vec<Coord> = Vec::new();
+        self.for_each_interesection(pov, 0, walls, &mut |intersection| {
+            intersections.push(intersection.expect("skip 0 cannot result in None value"));
+            false
+        });
+        let first = intersections.first().expect("No intersection found");
+        let last = intersections.last().expect("No intersection found");
+        // Make sure the ring is closed
+        if distance(first, last) > 1e-9 {
+            intersections.push(first.clone());
+        }
+        assert!(
+            intersections.len() > 2,
+            "Not enough intersections to form a linestring"
+        );
+        let linestring = LineString::new(intersections);
+        assert!(
+        linestring.is_closed(),
+        "The resulting line of sight ring is not closed (Begin and end coordinate are not equal)"
+        );
+        Polygon::new(linestring, vec![])
+    }
+
+    /// Calculate the indirect line of sight following paths along walls
+    fn calculate_indirect_los(&self, pov: Coordinate, walls: &Vec<Line>) -> Polygon {
+        let mut walls_and_edges = walls.to_vec();
+        let topleft = self.origin().as_coord();
+        let topright = Coord {
+            x: self.size().x,
+            y: self.origin().y,
+        };
+        let bottomleft = Coord {
+            x: self.origin().x,
+            y: self.size().y,
+        };
+        let bottomright = self.size().as_coord();
+        let topline = Line::new(topleft, topright);
+        let rightline = Line::new(topright, bottomright);
+        let bottomline = Line::new(bottomright, bottomleft);
+        let leftline = Line::new(bottomleft, topleft);
+        walls_and_edges.push(topline);
+        walls_and_edges.push(rightline);
+        walls_and_edges.push(bottomline);
+        walls_and_edges.push(leftline);
+        let planar_graph = helper::planar_graph(&walls_and_edges);
+        let mut unhandled_vectors = planar_graph.to_vec();
+        let mut found_polygons: Vec<Polygon> = Vec::new();
+        let mut los_polygons: Vec<Polygon> = Vec::new();
+        while !unhandled_vectors.is_empty() {
+            let polygon = create_polygon(&planar_graph, &mut unhandled_vectors);
+            if polygon.contains(&pov.as_coord()) {
+                los_polygons.push(polygon);
+            } else {
+                found_polygons.push(polygon);
+            }
+        }
+        let mut los_polygon = los_polygons
+            .iter()
+            .min_by(|x, y| x.unsigned_area().total_cmp(&y.unsigned_area()))
+            .expect("Should be at least 1 element")
+            .clone();
+        for polygon in found_polygons {
+            let multi_polygon = los_polygon.difference(&polygon);
+            multi_polygon.into_iter().for_each(|p| {
+                if p.contains(&pov.as_coord()) {
+                    los_polygon = p
+                }
+            });
+        }
+        los_polygon
+    }
+
+    /// Run a closure for each intersection point from pov to the edge of a map, skip first 'skip'
+    /// closest intersections. Intersections are given in a clockwise direction starting from
+    /// the pov the the map origin. The closure should return a boolean: exit early (true) or
+    /// continue normally (false)
+    fn for_each_interesection<F: FnMut(Option<Coord>) -> bool>(
+        &self,
+        pov: Coordinate,
+        skip: usize,
+        walls: &Vec<Line>,
+        f: &mut F,
+    ) {
+        // we do not loop through floats due to inaccuracies in floating point arithmetic
+        // In the first loop we vary x and make a line for pov to the top and bottom of the map
+        let x_min = self.origin().x as i32;
+        let x_max = self.size().x as i32;
+        let y_min = self.origin().y;
+        let start = Coord { x: pov.x, y: pov.y };
+        // Line from pov to top edge
+        for x in x_min..=(x_max * (1.0 / STEP_SIZE) as i32) {
+            let x = f64::from(x) * STEP_SIZE;
+            let end = Coord { x, y: y_min };
+            let line = Line::new(start, end);
+            let intersection = find_intersection(&line, walls, skip);
+            if f(intersection) {
+                return;
+            }
+        }
+        let x_max = self.size().x;
+        let y_min = self.origin().y as i32 + 1;
+        let y_max = self.size().y as i32;
+        // Line from pov to right edge
+        for y in y_min..=(y_max * (1.0 / STEP_SIZE) as i32) {
+            let y = f64::from(y) * STEP_SIZE;
+            let end = Coord { x: x_max, y };
+            let line = Line::new(start, end);
+            let intersection = find_intersection(&line, walls, skip);
+            if f(intersection) {
+                return;
+            }
+        }
+        // Line from pov to bottom edge
+        let x_min = self.origin().x as i32;
+        let x_max = self.size().x as i32;
+        let y_max = self.size().y;
+        for x in (x_min..=((x_max * (1.0 / STEP_SIZE) as i32) - 1)).rev() {
+            let x = f64::from(x) * STEP_SIZE;
+            let end = Coord { x, y: y_max };
+            let line = Line::new(start, end);
+            let intersection = find_intersection(&line, walls, skip);
+            if f(intersection) {
+                return;
+            }
+        }
+        // Line from pov to left edge
+        let x_max = self.origin().x;
+        let y_min = self.origin().y as i32;
+        let y_max = self.size().y as i32;
+        for y in (y_min..=((y_max * (1.0 / STEP_SIZE) as i32) - 1)).rev() {
+            let y = f64::from(y) * STEP_SIZE;
+            let end = Coord { x: x_max, y };
+            let line = Line::new(start, end);
+            let intersection = find_intersection(&line, walls, skip);
+            if f(intersection) {
+                return;
+            }
+        }
     }
 }
 
@@ -429,7 +723,7 @@ mod tests {
             .expect("Could not open file the example4.dd2vtt");
         vtt.fow_hide_all();
         let pov = Coordinate { x: 4.0, y: 7.0 };
-        vtt.fow_change(pov, false, Operation::SHOW, true)
+        vtt.fow_change(pov, Operation::SHOW, false, true)
             .expect("Could not update fow");
         vtt.save_img("tests/resources/los.png")
             .expect("Could not save the image to png")

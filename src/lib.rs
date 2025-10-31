@@ -24,6 +24,7 @@ pub mod fog_of_war;
 mod fowrectangle;
 mod helper;
 mod quadtreenode;
+pub mod vector;
 pub mod vtt;
 use anyhow::Result;
 use std::{fs::File, io::Read, path::Path};
@@ -32,7 +33,8 @@ use vtt::VTTPartial;
 pub use fog_of_war::FogOfWar;
 pub use vtt::VTT;
 
-/// Open a vtt file and store the contents in memory
+/// Open a vtt file and store the contents in memory. The map origin of the vtt should be 0,0 and
+/// the map size coordinate should be a whole number
 pub fn open_vtt<P: AsRef<Path>>(path: P) -> Result<VTT> {
     let mut file = File::open(path)?;
     let mut contents = String::new();

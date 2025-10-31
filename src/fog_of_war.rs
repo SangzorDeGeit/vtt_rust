@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use geo::Polygon;
+use geo::{MultiPolygon, Polygon};
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
 use crate::fowrectangle::FoWRectangle;

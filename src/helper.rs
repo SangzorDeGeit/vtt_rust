@@ -3,116 +3,12 @@ use std::collections::HashMap;
 use geo::LineIntersection::{Collinear, SinglePoint};
 use geo::{line_intersection, Coord, Line, LineString, Polygon};
 
+use crate::vector::Vector;
 use crate::vtt::Coordinate;
 
 const STEP_SIZE: f64 = 0.2;
 // Floating point multiplier to avoid floating point arithmetic
 const PRECISION: f64 = 10_000.0;
-
-/// Generate a Polygon representing the area that the pov can see. This vision is
-/// blocked by walls
-pub fn calculate_direct_los(
-    pov: Coordinate,
-    wall_segments: &Vec<Line>,
-    origin: &Coordinate,
-    size: &Coordinate,
-) -> Polygon {
-    let mut top_intersections = Vec::new();
-    let mut right_intersections = Vec::new();
-    let mut bottom_intersections = Vec::new();
-    let mut left_intersections = Vec::new();
-    // These asserts will make sure that the following logic will not fall apart due to floating
-    // point arithmetic
-    assert!(origin.x >= 0.0, "Origin x must positive");
-    assert!(origin.y >= 0.0, "Origin y must be positive");
-    assert_eq!(size.x.fract(), 0.0, "The size must be a whole number");
-    assert_eq!(size.y.fract(), 0.0, "The size must be a whole number");
-    let x_min = origin.x as i32;
-    let x_max = size.x as i32;
-    let y_min = origin.y;
-    let y_max = size.y;
-    let start = Coord { x: pov.x, y: pov.y };
-    // we do not loop through floats due to inaccuracies in floating point arithmetic
-    // In the first loop we vary x and make a line for pov to the top and bottom of the map
-    for x in x_min..=x_max * (1.0 / STEP_SIZE) as i32 {
-        let x = f64::from(x) * STEP_SIZE;
-
-        // Line from pov to top edge
-        let mut end = Coord { x, y: y_min };
-        let line = Line::new(start, end);
-        let intersection =
-            find_intersection(&line, wall_segments, 0).expect("Skip=0 cannot result in None value");
-        top_intersections.push(intersection);
-
-        // Line from pov to bottom edge
-        end = Coord { x, y: y_max };
-        let line = Line::new(start, end);
-        let intersection =
-            find_intersection(&line, wall_segments, 0).expect("Skip=0 cannot result in None value");
-        bottom_intersections.push(intersection);
-    }
-    let x_min = origin.x;
-    let x_max = size.x;
-    let y_min = origin.y as i32;
-    let y_max = size.y as i32;
-    for y in y_min..=y_max * (1.0 / STEP_SIZE) as i32 {
-        // Exclude the first and last iteration (already calculated in the previous loop)
-        if y == 0 || y == y_max * (1.0 / STEP_SIZE) as i32 {
-            continue;
-        }
-        let y = f64::from(y) * STEP_SIZE;
-
-        // Line from pov to left edge
-        let mut end = Coord { x: x_min, y };
-        let line = Line::new(start, end);
-        let intersection =
-            find_intersection(&line, wall_segments, 0).expect("Skip=0 cannot result in None value");
-        left_intersections.push(intersection);
-
-        // Line from pov to right edge
-        end = Coord { x: x_max, y };
-        let line = Line::new(start, end);
-        let intersection =
-            find_intersection(&line, wall_segments, 0).expect("Skip=0 cannot result in None value");
-        right_intersections.push(intersection);
-    }
-    // If we want to create a linestring in clockwise direction starting from 0.0:
-    // reverse the left and bottom intersection vectors (left should go from bottom to top and
-    // bottom should go from right to left)
-    bottom_intersections.reverse();
-    left_intersections.reverse();
-    top_intersections.append(&mut right_intersections);
-    top_intersections.append(&mut bottom_intersections);
-    top_intersections.append(&mut left_intersections);
-    let first = top_intersections.first().expect("No intersection found");
-    let last = top_intersections.last().expect("No intersection found");
-    // Make sure the ring is closed
-    if distance(first, last) > 1e-9 {
-        top_intersections.push(first.clone());
-    }
-    assert!(
-        top_intersections.len() > 2,
-        "Not enough intersections to form a linestring"
-    );
-    let los_ring = LineString::new(top_intersections);
-    assert!(
-        los_ring.is_closed(),
-        "The resulting line of sight ring is not closed (Begin and end coordinate are not equal)"
-    );
-    let polygon = Polygon::new(los_ring, vec![]);
-    polygon
-}
-
-/// Generate a linestring that will return the line of sight from the pov point, the pov can look
-/// perfectly around walls.
-/// Get all the intersection points with all the vectors going FROM the point
-/// input an array of lines
-/// compare line 1 with line 2, then 3 then 4 etc. get intersections
-/// if two lines intersect, the intersection point is always closer to the starting point compared
-/// to the end point
-pub fn calculate_indirect_los(pov: Coordinate, wall_segments: &Vec<Line>) -> Polygon {
-    todo!("Implement this function")
-}
 
 /// Given a line and an array of wall segments, this function will return the intersection point
 /// closest to the start point of the line. the `skip` variable determines how many intersection points to skip
@@ -176,9 +72,80 @@ pub fn find_intersection(line: &Line, wall_segments: &Vec<Line>, skip: usize) ->
 }
 
 /// Calculates the distance between two points
-fn distance(c1: &Coord, c2: &Coord) -> f64 {
+pub fn distance(c1: &Coord, c2: &Coord) -> f64 {
     //sqrt[(|x1-x2|^2) + (|y1-y2|^2)]
-    return ((c1.x - c2.x).abs().powi(2) + (c1.y - c2.y).abs().powi(2)).sqrt();
+    ((c1.x - c2.x).abs().powi(2) + (c1.y - c2.y).abs().powi(2)).sqrt()
+}
+
+/// Calculates if two coordinates are equal
+pub fn equal(c1: &Coord, c2: &Coord) -> bool {
+    (c1.x - c2.x).abs() < 1e-9 && (c1.y - c2.y).abs() < 1e-9
+}
+
+/// Creates a planar graph from all walls in the vtt; an array of vectors that go from- and to each
+/// coordinate point along wall lines
+pub fn planar_graph(walls: &Vec<Line>) -> Vec<Vector> {
+    let mut vectors: Vec<Vector> = Vec::new();
+    for wall in walls {
+        let mut intersections: Vec<Coordinate> = walls
+            .iter()
+            .filter_map(|l| {
+                let intersection =
+                    match line_intersection::line_intersection(wall.to_owned(), l.to_owned()) {
+                        Some(i) => i,
+                        None => return None,
+                    };
+                match intersection {
+                    SinglePoint { intersection, .. } => Some(Coordinate::from_coord(intersection)),
+                    _ => None,
+                }
+            })
+            .filter(|c| {
+                *c != Coordinate::from_coord(wall.start) && *c != Coordinate::from_coord(wall.end)
+            })
+            .collect();
+        intersections.push(Coordinate::from_coord(wall.start));
+        intersections.push(Coordinate::from_coord(wall.end));
+        intersections.sort();
+        let mut segment_vectors = Vector::from_intersections(intersections);
+        vectors.append(&mut segment_vectors);
+    }
+    vectors
+}
+
+/// Create a polygon from a planar graph, it will pick the first vector in the planar graph as the
+/// starting vector. This function can return an empty polygon (A polygon with no surface area),
+/// this function will update the planar graph to remove all vectors used in creating the polygon
+pub fn create_polygon(planar_graph: &Vec<Vector>, unhandled_vectors: &mut Vec<Vector>) -> Polygon {
+    let mut polygon_vectors = Vec::new();
+    let mut handled_vectors = Vec::new();
+    let start_vector = unhandled_vectors
+        .get(0)
+        .expect("unhandled vector should have at least 1 element")
+        .clone();
+    polygon_vectors.push(&start_vector);
+    let mut next_vector = start_vector.next(planar_graph);
+    while !polygon_vectors.contains(&next_vector) {
+        handled_vectors.push(next_vector.clone());
+        if *next_vector == start_vector {
+            break;
+        }
+        if let Some(last_vector) = polygon_vectors.last() {
+            if last_vector.is_inverse(next_vector) {
+                next_vector = next_vector.next(planar_graph);
+                polygon_vectors.pop();
+                continue;
+            }
+        }
+        polygon_vectors.push(next_vector);
+        next_vector = next_vector.next(planar_graph);
+    }
+    handled_vectors.push(next_vector.clone());
+    unhandled_vectors.retain(|v| !handled_vectors.contains(v));
+    let polygon_points: Vec<Coord> = polygon_vectors.into_iter().map(|v| v.start()).collect();
+    let mut linestring = LineString::new(polygon_points);
+    linestring.close();
+    Polygon::new(linestring, vec![])
 }
 
 #[cfg(test)]
