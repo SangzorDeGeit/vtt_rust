@@ -31,6 +31,7 @@ use std::{fs::File, io::Read, path::Path};
 use vtt::VTTPartial;
 
 pub use fog_of_war::FogOfWar;
+pub use fowrectangle::FoWRectangle;
 pub use vtt::Coordinate;
 pub use vtt::VTT;
 
