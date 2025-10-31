@@ -31,6 +31,7 @@ use std::{fs::File, io::Read, path::Path};
 use vtt::VTTPartial;
 
 pub use fog_of_war::FogOfWar;
+pub use vtt::Coordinate;
 pub use vtt::VTT;
 
 /// Open a vtt file and store the contents in memory. The map origin of the vtt should be 0,0 and
