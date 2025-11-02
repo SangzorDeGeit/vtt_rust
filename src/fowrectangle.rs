@@ -5,8 +5,6 @@ use crate::vtt::Resolution;
 use geo::Area;
 use geo::BooleanOps;
 use geo::Coord;
-use geo::LinesIter;
-use geo::MultiPolygon;
 use geo::Polygon;
 use geo::Rect as georect;
 use imageproc::rect::Rect as imageprocrect;
