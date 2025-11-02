@@ -3,7 +3,7 @@ use crate::{
     fog_of_war::{FogOfWar, Operation},
     helper::{self, create_polygon, distance, find_intersection},
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::{prelude::BASE64_STANDARD, Engine as _};
 use geo::{Area, BooleanOps, Contains, Coord, Distance, Euclidean, Line, LineString, Polygon};
 use image::{save_buffer, DynamicImage, ExtendedColorType, ImageReader, Rgb, RgbImage};
@@ -30,7 +30,7 @@ pub struct VTTPartial {
     portals: Vec<Portal>,
     environment: Environment,
     lights: Vec<Light>,
-    image: String,
+    image: Option<String>,
 }
 
 /// The main VTT structure containing all the data that is in the .vtt file including a fog of war
@@ -45,7 +45,7 @@ pub struct VTT {
     environment: Environment,
     lights: Vec<Light>,
     fog_of_war: FogOfWar,
-    image: String,
+    image: Option<String>,
 }
 
 #[doc(hidden)]
@@ -413,13 +413,26 @@ impl VTT {
         all_lines
     }
 
+    /// Take the image out of the vtt struct as bytes. After using this function the vtt will not
+    /// contain an image (image field is None).
+    pub fn take_image(&mut self) -> Result<Vec<u8>> {
+        match self.image.take() {
+            Some(image) => Ok(BASE64_STANDARD.decode(image.as_str())?),
+            None => bail!(RustVttError::NoImage),
+        }
+    }
+
     /// Save the base64 encoded image of this vtt to a .png file.
     /// ## `path`
     /// The path to the file that the image will be exported to **excluding** the extension.
     /// # Example
     /// `save_image("path/to/filename")`
     pub fn save_img_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
+        let image = match &self.image {
+            Some(i) => i,
+            None => bail!(RustVttError::NoImage),
+        };
+        let decoded = BASE64_STANDARD.decode(image.as_str())?;
         let mut file = File::options()
             .write(true)
             .truncate(true)
@@ -431,7 +444,11 @@ impl VTT {
 
     /// Apply all vtt data (fog of war, lighting, etc.) to the image stored in this vtt and save it to a .png file.
     pub fn save_img<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let decoded = BASE64_STANDARD.decode(self.image.as_str())?;
+        let image = match &self.image {
+            Some(i) => i,
+            None => bail!(RustVttError::NoImage),
+        };
+        let decoded = BASE64_STANDARD.decode(image.as_str())?;
         let img = ImageReader::new(Cursor::new(decoded))
             .with_guessed_format()?
             .decode()?;

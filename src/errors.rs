@@ -11,6 +11,8 @@ pub enum RustVttError {
     InvalidPoint { coordinate: Coordinate },
     #[error("Given rectangle is already the minimum size: {:?}", rectangle)]
     MinimumRectangle { rectangle: FoWRectangle },
+    #[error("Failed to get the image from the VTT")]
+    NoImage,
     #[error("Invalid input to function")]
     InvalidInput,
 }
