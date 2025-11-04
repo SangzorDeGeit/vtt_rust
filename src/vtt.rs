@@ -490,6 +490,7 @@ impl VTT {
             .par_iter_mut()
             .map(|x| x.as_rect())
             .collect();
+        println!("amount of rects: {}", rectangles.len());
         for rect in rectangles {
             drawing::draw_filled_rect_mut(&mut image, rect, Rgb([0, 0, 0]));
         }
@@ -702,6 +703,17 @@ mod tests {
             256,
             "pixels per grid did not match. Expected 256, found {}",
             vtt.pixels_per_grid()
+        );
+    }
+
+    #[test]
+    fn vtt_take_image() {
+        let mut vtt = open_vtt("tests/resources/example1.dd2vtt")
+            .expect("Could not open file example1.dd2vtt");
+        let _ = vtt.take_image();
+        assert!(
+            vtt.image.is_none(),
+            "Image should be set to none after taking it"
         );
     }
 

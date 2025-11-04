@@ -94,37 +94,20 @@ impl QuadtreeNode {
     /// Given a line of sight polygon and an operation this function will create a tree that
     /// reveals or hides the part of the polygon. The input to this function should be a completely
     /// hidden (visible=false) or completely shown (visible=true) root node.
-    pub fn create_tree(
-        &mut self,
-        make_visible: bool,
-        polygon: &Polygon,
-        rect_counter: Arc<AtomicUsize>,
-    ) {
+    pub fn create_tree(&mut self, make_visible: bool, polygon: &Polygon) {
         match self {
             Self::Leaf { bounds, visible } => match bounds.in_polygon(polygon) {
                 InLineString::INSIDE => {
                     *visible = make_visible;
-                    if *visible {
-                        rect_counter.fetch_sub(1, Ordering::Relaxed);
-                    } else {
-                        rect_counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    return;
                 }
                 InLineString::OUTSIDE => {
                     *visible = !make_visible;
-                    if *visible {
-                        rect_counter.fetch_sub(1, Ordering::Relaxed);
-                    } else {
-                        rect_counter.fetch_add(1, Ordering::Relaxed);
-                    }
-                    return;
                 }
                 InLineString::PARTIAL => {
                     if let Err(_) = self.to_internal() {
                         return;
                     }
-                    self.create_tree(make_visible, polygon, rect_counter);
+                    self.create_tree(make_visible, polygon);
                     return;
                 }
             },
@@ -134,10 +117,10 @@ impl QuadtreeNode {
                 bottomleft,
                 bottomright,
             } => {
-                topleft.create_tree(make_visible, polygon, rect_counter.clone());
-                topright.create_tree(make_visible, polygon, rect_counter.clone());
-                bottomleft.create_tree(make_visible, polygon, rect_counter.clone());
-                bottomright.create_tree(make_visible, polygon, rect_counter.clone());
+                topleft.create_tree(make_visible, polygon);
+                topright.create_tree(make_visible, polygon);
+                bottomleft.create_tree(make_visible, polygon);
+                bottomright.create_tree(make_visible, polygon);
                 return;
             }
         };
@@ -172,16 +155,16 @@ impl QuadtreeNode {
                 self.hide(other, rect_counter);
             }
             (Q::Internal { .. }, Q::Leaf { visible, .. }) => {
-                let mut count = 0;
-                self.hidden_children(&mut count);
-                rect_counter.fetch_sub(count, Ordering::Relaxed);
                 if !visible {
+                    let mut count = 0;
+                    self.hidden_children(&mut count);
+                    rect_counter.fetch_sub(count, Ordering::Relaxed);
                     *self = Self::Leaf {
                         bounds: self.get_area(),
                         visible: false,
                     };
+                    rect_counter.fetch_add(1, Ordering::Relaxed);
                 }
-                rect_counter.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             (
@@ -235,10 +218,10 @@ impl QuadtreeNode {
                 self.show(other, rect_counter);
             }
             (Q::Internal { .. }, Q::Leaf { visible, .. }) => {
-                let mut count = 0;
-                self.hidden_children(&mut count);
-                rect_counter.fetch_sub(count, Ordering::Relaxed);
                 if *visible {
+                    let mut count = 0;
+                    self.hidden_children(&mut count);
+                    rect_counter.fetch_sub(count, Ordering::Relaxed);
                     *self = Self::Leaf {
                         bounds: self.get_area(),
                         visible: true,
@@ -349,7 +332,7 @@ impl QuadtreeNode {
 
     /// Update the given count for the amount of hidden children, also counts the current node if
     /// hidden, so initial call should be with an internal node
-    fn hidden_children(&self, count: &mut usize) {
+    pub fn hidden_children(&self, count: &mut usize) {
         match self {
             QuadtreeNode::Leaf { visible, .. } => {
                 if !visible {

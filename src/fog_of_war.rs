@@ -16,10 +16,11 @@ use crate::vtt::{PixelCoordinate, Resolution};
 #[derive(Debug, Clone)]
 pub struct FogOfWar {
     squares: Vec<FowNode>,
-    rectangle_count: Arc<AtomicUsize>,
+    pub rectangle_count: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Clone)]
+/// One FowNode represents one square in the map
 pub struct FowNode {
     state: FowState,
     rect: FoWRectangle,
@@ -76,7 +77,7 @@ impl FogOfWar {
     pub fn hide_all(&mut self) {
         let amount = self.squares.len();
         self.squares.iter_mut().for_each(|f| {
-            f.hide();
+            f.hide(self.rectangle_count.clone());
         });
         self.rectangle_count.swap(amount, Ordering::Relaxed);
     }
@@ -84,7 +85,7 @@ impl FogOfWar {
     /// Set the fog of war area to visible
     pub fn show_all(&mut self) {
         self.squares.iter_mut().for_each(|f| {
-            f.show();
+            f.show(self.rectangle_count.clone());
         });
         self.rectangle_count.swap(0, Ordering::Relaxed);
     }
@@ -102,8 +103,7 @@ impl FogOfWar {
 
     /// Gets all rectangles covered by fog of war
     pub fn get_rectangles(&self) -> Vec<FoWRectangle> {
-        let mut vec: Vec<FoWRectangle> =
-            Vec::with_capacity(self.rectangle_count.load(Ordering::Relaxed));
+        let mut vec: Vec<FoWRectangle> = Vec::new();
         self.squares.iter().for_each(|f| f.rectangles(&mut vec));
         vec
     }
@@ -118,14 +118,27 @@ impl FowNode {
         }
     }
 
-    /// Sets the state of the current node to hidden
-    pub fn hide(&mut self) {
-        self.state = FowState::Hidden;
+    /// Sets the state of the current node to hidden returns whether the state of the node was
+    /// changed
+    pub fn hide(&mut self, rect_counter: Arc<AtomicUsize>) {
+        match self.state {
+            FowState::Hidden => (),
+            _ => {
+                self.state = FowState::Hidden;
+                rect_counter.fetch_sub(1, Ordering::Relaxed);
+            }
+        };
     }
 
     /// Sets the state of the current node to shown
-    pub fn show(&mut self) {
-        self.state = FowState::Shown;
+    pub fn show(&mut self, rect_counter: Arc<AtomicUsize>) {
+        match self.state {
+            FowState::Shown => (),
+            _ => {
+                self.state = FowState::Shown;
+                rect_counter.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Update this node according to the polygon and if the polygon makes areas visible
@@ -140,17 +153,17 @@ impl FowNode {
         match self.rect.in_polygon(polygon) {
             I::INSIDE => {
                 if make_visible {
-                    self.show();
-                    rect_counter.fetch_add(1, Ordering::Relaxed);
+                    self.show(rect_counter);
                 } else {
-                    self.hide();
-                    rect_counter.fetch_sub(1, Ordering::Relaxed);
+                    self.hide(rect_counter);
                 }
             }
             I::OUTSIDE => (),
-            I::PARTIAL => {
-                self.partial(make_visible, polygon, rect_counter);
-            }
+            I::PARTIAL => match (&self.state, make_visible) {
+                (FowState::Shown, false) => self.partial(make_visible, polygon, rect_counter),
+                (FowState::Hidden, true) => self.partial(make_visible, polygon, rect_counter),
+                _ => (),
+            },
         }
     }
 
@@ -163,7 +176,7 @@ impl FowNode {
         rect_counter: Arc<AtomicUsize>,
     ) {
         let mut quad_tree = QuadtreeNode::from_bounds(self.rect, !make_visible);
-        quad_tree.create_tree(make_visible, &polygon, rect_counter.clone());
+        quad_tree.create_tree(make_visible, &polygon);
         match &mut self.state {
             FowState::Partial { node } => {
                 if make_visible {
@@ -174,7 +187,18 @@ impl FowNode {
                     node.clean(rect_counter);
                 }
             }
-            _ => {
+            FowState::Hidden => {
+                let mut count = 0;
+                quad_tree.hidden_children(&mut count);
+                rect_counter.fetch_add(count - 1, Ordering::Relaxed);
+                quad_tree.clean(rect_counter);
+                self.state = FowState::Partial { node: quad_tree };
+            }
+            FowState::Shown => {
+                let mut count = 0;
+                quad_tree.hidden_children(&mut count);
+                rect_counter.fetch_add(count, Ordering::Relaxed);
+                quad_tree.clean(rect_counter);
                 self.state = FowState::Partial { node: quad_tree };
             }
         }
