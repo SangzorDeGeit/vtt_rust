@@ -159,11 +159,7 @@ impl FowNode {
                 }
             }
             I::OUTSIDE => (),
-            I::PARTIAL => match (&self.state, make_visible) {
-                (FowState::Shown, false) => self.partial(make_visible, polygon, rect_counter),
-                (FowState::Hidden, true) => self.partial(make_visible, polygon, rect_counter),
-                _ => (),
-            },
+            I::PARTIAL => self.partial(make_visible, polygon, rect_counter),
         }
     }
 
